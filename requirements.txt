@@ -1,0 +1,17 @@
+# SIGMANIX SPACES backend — Python 3.11
+# Runtime
+fastapi==0.143.0
+uvicorn[standard]==0.54.0
+pydantic==2.14.1
+pydantic-settings==2.15.0
+SQLAlchemy==2.0.54
+alembic==1.20.0
+psycopg[binary]==3.3.6
+PyJWT[crypto]==2.15.1
+python-multipart==0.0.32
+email-validator==2.3.0
+httpx==0.28.1
+
+# Development and testing
+pytest==9.1.1
+ruff==0.17.0
