@@ -137,6 +137,17 @@ def test_search_treats_wildcards_literally(api: TestClient) -> None:
     assert api.get(PROPERTIES, params={"search": "_lpha"}).json()["total"] == 0
 
 
+def test_values_the_database_cannot_store_are_rejected(api: TestClient) -> None:
+    nul = api.get(PROPERTIES, params={"search": "\x00"})
+    too_many = api.post(PROPERTIES, json=property_payload(capacity=10**20))
+    too_large = api.post(PROPERTIES, json=property_payload(area_sqft=1e30))
+
+    for response in (nul, too_many, too_large):
+        assert response.status_code == 422
+        assert response.json()["code"] == "validation_error"
+    assert api.get(PROPERTIES).json()["total"] == 0
+
+
 def test_list_parameter_limits(api: TestClient) -> None:
     assert api.get(PROPERTIES, params={"page_size": 101}).status_code == 422
     assert api.get(PROPERTIES, params={"page": 0}).status_code == 422

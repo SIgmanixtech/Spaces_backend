@@ -176,7 +176,7 @@ parameters, response schema and error responses. Summary:
 | Buildings | `/buildings` | list, create, get, update, delete | Filter by `property_id` |
 | Floors | `/floors` | list, create, get, update, delete | Filter by `building_id` |
 | Layouts | `/layouts`, `/layouts/{id}/spaces` | list, create, get, update, archive | Floor plan images arrive with file uploads |
-| Spaces | `/spaces` | list, create, get, update, archive | `status` is derived; `operational_status` is set by an admin |
+| Spaces | `/spaces`, `/spaces/{id}/move` | list, create, get, update, archive, move | `status` is derived; `operational_status` is set by an admin. See [Inventory hierarchy](#inventory-hierarchy) |
 | Bookings | `/bookings`, `/bookings/availability`, `/bookings/{id}/confirm` / `complete` / `cancel` | list, create, get, reschedule, confirm, complete, cancel | `DELETE` cancels; bookings are never deleted |
 | Amenities | `/amenities` | list, create, get, update, delete | One item per property; names map to shared definitions |
 | Tenants | `/tenants`, `/tenants/{id}/occupancies`, `/occupancies/{id}` | list, create, get, update, archive; occupancy create/list/update/delete | Occupancy dates are inclusive calendar days |
@@ -197,6 +197,30 @@ Conventions for every resource:
 - **Archive vs delete:** properties, spaces, tenants and layouts are archived and
   kept. Buildings, floors, amenity assignments, occupancies and assets are
   deleted, and the delete is refused with `409` while other records reference them.
+
+### Inventory hierarchy
+
+Property -> Building -> Floor -> Space. Revision `0002` adds this to `spaces`;
+it is **proposed and not yet applied to the Supabase database**.
+
+- A space is either **unassigned** (no floor: every space created before `0002`,
+  and any created without `floor_id`) or **on a floor**.
+- On a floor, one space of type `FLOOR` is the whole floor. Create it first.
+  Every other space on the floor has a parent: the whole-floor space by default,
+  or `parent_space_id`. A space's floor, building and property always agree.
+- Allowed nesting: `PORTION` in `FLOOR`; offices, coworking areas, cabins, rooms
+  and `NON_RENTABLE` spaces in `FLOOR` or `PORTION`; `DESK` in `FLOOR`, `PORTION`,
+  `PRIVATE_OFFICE` or `COWORKING`.
+- `POST /spaces/{id}/move` assigns an unassigned space to a floor, or moves a
+  space with everything inside it. Moving a space that is already on a floor is
+  refused (`409`) while it, or a space inside it, has open bookings or a current
+  or upcoming occupancy. `PATCH` never changes the floor or parent.
+- `GET /spaces` leaves out whole-floor and non-rentable spaces unless
+  `include_structural=true`. Filters: `building_id`, `floor_id`,
+  `parent_space_id`, `is_rentable`, `unassigned`.
+- Bookings and occupancies still apply to one space at a time. Conflicts between
+  a space and the spaces inside it are not checked until the allocation engine
+  is added.
 
 ### Derived status
 

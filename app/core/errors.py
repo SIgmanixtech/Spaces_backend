@@ -9,6 +9,7 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import DataError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.logging import request_id_ctx
@@ -103,6 +104,17 @@ def register_exception_handlers(app: FastAPI) -> None:
             for error in exc.errors()
         ]
         return error_response(422, "validation_error", "Request validation failed.", errors)
+
+    @app.exception_handler(DataError)
+    async def _data_error(_: Request, exc: DataError) -> JSONResponse:
+        # A value passed validation but the database cannot store it: a number
+        # beyond the column's range, or text containing a NUL character.
+        logger.warning("Rejected unstorable value: %s", type(exc.orig).__name__)
+        return error_response(
+            422,
+            "validation_error",
+            "A value is out of range or contains characters that cannot be stored.",
+        )
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_error(_: Request, exc: StarletteHTTPException) -> JSONResponse:

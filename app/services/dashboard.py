@@ -33,7 +33,12 @@ from app.schemas.dashboard import (
     PropertyAvailability,
     SpaceSummary,
 )
-from app.services.occupancy import business_today, property_occupancy, space_statuses
+from app.services.occupancy import (
+    business_today,
+    is_rentable_unit,
+    property_occupancy,
+    space_statuses,
+)
 
 TREND_MONTHS = 6
 
@@ -43,7 +48,7 @@ def _live_spaces(session: Session) -> list[Space]:
         session.scalars(
             select(Space)
             .join(Property, Property.id == Space.property_id)
-            .where(Space.archived_at.is_(None), Property.archived_at.is_(None))
+            .where(Space.archived_at.is_(None), Property.archived_at.is_(None), is_rentable_unit())
         )
     )
 
@@ -98,7 +103,9 @@ def _occupancy_trend(session: Session, today: date) -> list[OccupancyTrendPoint]
     spaces = [
         (space_id, property_id, local_day(created_at), local_day(archived_at))
         for space_id, property_id, created_at, archived_at in session.execute(
-            select(Space.id, Space.property_id, Space.created_at, Space.archived_at)
+            select(Space.id, Space.property_id, Space.created_at, Space.archived_at).where(
+                is_rentable_unit()
+            )
         )
     ]
     occupancies = session.execute(

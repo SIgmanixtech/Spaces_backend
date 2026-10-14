@@ -77,6 +77,17 @@ def test_times_are_normalised_to_utc(api: TestClient, room: dict) -> None:
     assert booking["start_at"].endswith(("Z", "+00:00"))
 
 
+def test_dates_beyond_the_supported_years_are_rejected(api: TestClient, room: dict) -> None:
+    edge = {"start_at": "9999-12-31T23:00:00Z", "end_at": "9999-12-31T23:59:59Z"}
+
+    created = api.post(BOOKINGS, json=booking_body(room, **edge))
+    checked = api.get(f"{BOOKINGS}/availability", params={"space_id": room["id"], **edge})
+
+    for response in (created, checked):
+        assert response.status_code == 400
+        assert "between 2000 and 2200" in response.json()["detail"]
+
+
 def test_booking_can_be_created_confirmed_for_a_tenant(api: TestClient, room: dict) -> None:
     tenant = post(api, "tenants", {"name": "Acme Ltd"})
 

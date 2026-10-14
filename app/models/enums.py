@@ -50,6 +50,13 @@ class SpaceType(StrEnum):
     CABIN = "CABIN"
     MEETING_ROOM = "MEETING_ROOM"
     COWORKING = "COWORKING"
+    # The whole floor: the single root every other space on a floor descends from.
+    FLOOR = "FLOOR"
+    PORTION = "PORTION"
+    CONFERENCE_ROOM = "CONFERENCE_ROOM"
+    TRAINING_ROOM = "TRAINING_ROOM"
+    # Corridors, washrooms, service areas: part of the inventory, never rented.
+    NON_RENTABLE = "NON_RENTABLE"
 
 
 class SpaceOperationalStatus(StrEnum):

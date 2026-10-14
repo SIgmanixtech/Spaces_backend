@@ -35,6 +35,7 @@ from app.models.enums import (
     PropertyStatus,
     SpaceOperationalStatus,
     SpaceStatus,
+    SpaceType,
 )
 from app.models.property import Property
 from app.models.space import Space
@@ -48,6 +49,15 @@ def business_today(now: datetime | None = None) -> date:
     """Today's calendar date in the configured business time zone."""
     moment = now or datetime.now(UTC)
     return moment.astimezone(ZoneInfo(get_settings().business_timezone)).date()
+
+
+def is_rentable_unit() -> ColumnElement[bool]:
+    """Spaces that count as inventory to let: not the whole-floor root, not non-rentable ones.
+
+    Every space that existed before the hierarchy satisfies this, so counts and
+    lists that use it are unchanged for existing data.
+    """
+    return and_(Space.is_rentable, Space.space_type != SpaceType.FLOOR)
 
 
 def occupancy_covers(day: date) -> ColumnElement[bool]:
@@ -90,7 +100,7 @@ def property_occupancy(
     space_totals = dict(
         session.execute(
             select(Space.property_id, func.count())
-            .where(Space.property_id.in_(ids), Space.archived_at.is_(None))
+            .where(Space.property_id.in_(ids), Space.archived_at.is_(None), is_rentable_unit())
             .group_by(Space.property_id)
         ).all()
     )

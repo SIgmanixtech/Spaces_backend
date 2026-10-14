@@ -41,6 +41,7 @@ from app.services.base import commit, flush, log_activity, require
 from app.services.occupancy import OPEN_BOOKING_STATUSES
 
 MAX_DURATION = timedelta(days=366)
+MIN_YEAR, MAX_YEAR = 2000, 2200
 # Lets a booking "starting now" survive the time the request spends in transit.
 START_GRACE = timedelta(minutes=5)
 
@@ -115,6 +116,7 @@ class BookingService:
         """Answer from committed records only. Creating a booking re-checks under a lock."""
         if end_at <= start_at:
             raise BadRequestError("end_at must be after start_at.")
+        self._check_years(start_at, end_at)
         space = require(self.session, Space, space_id, "Space")
         prop = self.session.get(Property, space.property_id)
         conflicts = self._overlapping(space.id, start_at, end_at, exclude_booking_id)
@@ -243,7 +245,14 @@ class BookingService:
         commit(self.session)
         return self.get(booking.id)
 
+    def _check_years(self, start_at: datetime, end_at: datetime) -> None:
+        # Dates at the edge of what a datetime can hold overflow when converted
+        # to the business time zone.
+        if not (start_at.year >= MIN_YEAR and end_at.year <= MAX_YEAR):
+            raise BadRequestError(f"Booking dates must be between {MIN_YEAR} and {MAX_YEAR}.")
+
     def _check_window(self, start_at: datetime, end_at: datetime) -> None:
+        self._check_years(start_at, end_at)
         if start_at < datetime.now(UTC) - START_GRACE:
             raise BadRequestError("A booking cannot start in the past.")
         if end_at - start_at > MAX_DURATION:

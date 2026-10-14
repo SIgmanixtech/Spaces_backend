@@ -22,6 +22,10 @@ _CONSTRAINT_MESSAGES = {
     "uq_floors_building_level": "This building already has a floor at that level.",
     "uq_layouts_property_name": "This property already has a layout with that name.",
     "uq_spaces_property_code": "This property already has a space with that code.",
+    "uq_spaces_floor_root": "This floor already has a whole-floor space.",
+    "fk_spaces_parent_space_id_spaces": (
+        "The space hierarchy changed while this request was running. Try again."
+    ),
     "uq_property_amenities_pair": "This amenity is already assigned to the property.",
     "uq_assets_asset_tag": "Another asset already uses that asset tag.",
     "uq_amenities_name": "An amenity with that name already exists.",
