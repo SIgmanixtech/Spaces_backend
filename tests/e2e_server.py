@@ -12,6 +12,7 @@ contains "test". On start it migrates that database and EMPTIES every table.
 
 import os
 import sys
+import tempfile
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -42,6 +43,9 @@ os.environ.update(
         "DATABASE_URL": _url,
         "SUPABASE_URL": "http://supabase.test",
         "CORS_ALLOWED_ORIGINS": "http://localhost:8080,http://localhost:5173",
+        # Uploads go to a throwaway folder, never to Supabase Storage.
+        "STORAGE_BACKEND": "local",
+        "LOCAL_STORAGE_DIR": tempfile.mkdtemp(prefix="sigmanix-e2e-uploads-"),
     }
 )
 

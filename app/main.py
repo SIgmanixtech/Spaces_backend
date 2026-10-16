@@ -30,7 +30,10 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     # Raises ConfigurationError naming every missing/invalid setting.
     settings = get_settings()
-    configure_logging(settings.log_level)
+    configure_logging(
+        settings.log_level,
+        settings.log_format or ("json" if settings.app_env == "production" else "text"),
+    )
 
     app = FastAPI(
         title="SIGMANIX SPACES API",

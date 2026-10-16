@@ -107,3 +107,4 @@ class FileKind(StrEnum):
     WORKSPACE = "WORKSPACE"
     FLOOR_PLAN = "FLOOR_PLAN"
     DOCUMENT = "DOCUMENT"
+    ASSET = "ASSET"

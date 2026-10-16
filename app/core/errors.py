@@ -65,6 +65,16 @@ class ConflictError(AppError):
     code = "conflict"
 
 
+class PayloadTooLargeError(AppError):
+    status_code = 413
+    code = "payload_too_large"
+
+
+class UnsupportedMediaTypeError(AppError):
+    status_code = 415
+    code = "unsupported_media_type"
+
+
 class ServiceUnavailableError(AppError):
     status_code = 503
     code = "service_unavailable"

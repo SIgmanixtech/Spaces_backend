@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     app_host: str = "127.0.0.1"
     app_port: int = 8000
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    # "text" prints one readable line per request (default outside production);
+    # "json" prints structured lines for log collectors (default in production).
+    log_format: Literal["text", "json"] | None = None
 
     database_url: SecretStr
 
@@ -40,6 +43,13 @@ class Settings(BaseSettings):
     supabase_publishable_key: SecretStr | None = None
     supabase_secret_key: SecretStr | None = None
     property_storage_bucket: str = "property-files"
+    # Where uploaded files go: Supabase Storage, or a local folder for development
+    # and tests only. "supabase" needs SUPABASE_SECRET_KEY and an existing private bucket.
+    storage_backend: Literal["supabase", "local"] = "supabase"
+    local_storage_dir: Path = BACKEND_ROOT / "var" / "uploads"
+    max_upload_mb: int = 10
+    # Most files one owner (a property itself, or one building, layout, space or asset) may hold.
+    max_files_per_owner: int = 40
 
     supabase_jwt_audience: str = "authenticated"
     supabase_jwt_secret: SecretStr | None = None

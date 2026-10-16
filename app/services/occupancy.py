@@ -15,6 +15,13 @@ Space (``SpaceStatus``)
     BOOKED       a CONFIRMED booking is in progress
     RESERVED     a PENDING/CONFIRMED booking has not ended yet
     AVAILABLE    none of the above
+
+    A space also takes the status of any space containing it, when that is the
+    stronger of the two (in the order above): a desk inside an occupied portion
+    is OCCUPIED, one inside a booked portion is BOOKED, one inside a closed
+    portion is UNAVAILABLE. A container does not take its contents' status: a
+    portion with one booked desk is not booked as a whole, though booking it
+    for that time is refused.
 """
 
 import uuid
@@ -40,6 +47,7 @@ from app.models.enums import (
 from app.models.property import Property
 from app.models.space import Space
 from app.models.tenant import Tenant, TenantOccupancy
+from app.services.hierarchy import chain, parent_map
 
 # Bookings that still hold a future or in-progress claim on a space.
 OPEN_BOOKING_STATUSES = (BookingStatus.PENDING, BookingStatus.CONFIRMED)
@@ -145,14 +153,35 @@ def property_occupancy(
     return result
 
 
+# Strongest first: a space shows the first of these that applies to it or a container.
+_STATUS_ORDER = (
+    SpaceStatus.UNAVAILABLE,
+    SpaceStatus.OCCUPIED,
+    SpaceStatus.BOOKED,
+    SpaceStatus.RESERVED,
+    SpaceStatus.AVAILABLE,
+)
+
+
 def space_statuses(
     session: Session, spaces: Sequence[Space], now: datetime | None = None
 ) -> dict[uuid.UUID, SpaceStatus]:
     if not spaces:
         return {}
     now = now or datetime.now(UTC)
-    space_ids = [space.id for space in spaces]
+    parents = parent_map(session, [space.id for space in spaces])
+    # The spaces asked about and every space containing them.
+    family_ids = list(parents)
     property_ids = list({space.property_id for space in spaces})
+
+    inactive = set(
+        session.scalars(
+            select(Space.id).where(
+                Space.id.in_(family_ids),
+                Space.operational_status != SpaceOperationalStatus.ACTIVE,
+            )
+        )
+    )
 
     occupied_spaces: set[uuid.UUID] = set()
     occupied_properties: set[uuid.UUID] = set()
@@ -170,7 +199,7 @@ def space_statuses(
     upcoming: set[uuid.UUID] = set()
     for space_id, status, start_at in session.execute(
         select(Booking.space_id, Booking.status, Booking.start_at).where(
-            Booking.space_id.in_(space_ids),
+            Booking.space_id.in_(family_ids),
             Booking.status.in_(OPEN_BOOKING_STATUSES),
             Booking.end_at > now,
         )
@@ -180,16 +209,23 @@ def space_statuses(
         else:
             upcoming.add(space_id)
 
+    def own(space_id: uuid.UUID) -> SpaceStatus:
+        if space_id in inactive:
+            return SpaceStatus.UNAVAILABLE
+        if space_id in occupied_spaces:
+            return SpaceStatus.OCCUPIED
+        if space_id in in_progress:
+            return SpaceStatus.BOOKED
+        if space_id in upcoming:
+            return SpaceStatus.RESERVED
+        return SpaceStatus.AVAILABLE
+
     result: dict[uuid.UUID, SpaceStatus] = {}
     for space in spaces:
+        candidates = [own(space_id) for space_id in [space.id, *chain(parents, space.id)]]
         if space.operational_status != SpaceOperationalStatus.ACTIVE:
-            result[space.id] = SpaceStatus.UNAVAILABLE
-        elif space.id in occupied_spaces or space.property_id in occupied_properties:
-            result[space.id] = SpaceStatus.OCCUPIED
-        elif space.id in in_progress:
-            result[space.id] = SpaceStatus.BOOKED
-        elif space.id in upcoming:
-            result[space.id] = SpaceStatus.RESERVED
-        else:
-            result[space.id] = SpaceStatus.AVAILABLE
+            candidates.append(SpaceStatus.UNAVAILABLE)
+        if space.property_id in occupied_properties:
+            candidates.append(SpaceStatus.OCCUPIED)
+        result[space.id] = min(candidates, key=_STATUS_ORDER.index)
     return result

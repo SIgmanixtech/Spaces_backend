@@ -182,6 +182,7 @@ def test_upgrade_keeps_every_existing_row_and_a_clean_downgrade_restores_them(
 
 
 def test_downgrade_refuses_to_discard_hierarchy_data(migrations: Config) -> None:
+    command.downgrade(migrations, "0002")
     with get_engine().begin() as connection:
         insert_legacy_data(connection)
         property_id = connection.execute(text("SELECT id FROM properties")).scalar_one()
@@ -225,6 +226,7 @@ def test_downgrade_refuses_to_discard_hierarchy_data(migrations: Config) -> None
 def test_downgrade_guard_covers_each_new_column(
     migrations: Config, change: str, refused: bool
 ) -> None:
+    command.downgrade(migrations, "0002")
     with get_engine().begin() as connection:
         insert_legacy_data(connection)
         connection.execute(text(f"UPDATE spaces SET {change} WHERE code = 'L-0'"))  # noqa: S608
@@ -256,3 +258,152 @@ def test_revision_0002_renders_as_sql_without_a_database(
     assert "DELETE FROM" not in upgrade and "TRUNCATE" not in upgrade
 
     assert downgrade.index("Cannot downgrade past 0002") < downgrade.index("DROP COLUMN")
+
+
+# --- revision 0003: file metadata ---------------------------------------------------
+
+NEW_FILE_COLUMNS = {
+    "asset_id",
+    "width_px",
+    "height_px",
+    "caption",
+    "description",
+    "category",
+    "sort_order",
+    "is_primary",
+}
+
+
+def insert_files(connection: Connection) -> dict[str, str]:
+    """Files shaped as 0002 stores them: two covers, a gallery picture and two plans."""
+    property_id = connection.execute(text("SELECT id FROM properties")).scalar_one()
+    layout_id = connection.execute(text("SELECT id FROM layouts")).scalar_one()
+    made: dict[str, str] = {}
+    for name, kind, layout, created in (
+        ("old-cover", "MAIN", None, "2026-01-01"),
+        ("new-cover", "MAIN", None, "2026-02-01"),
+        ("gallery", "GALLERY", None, "2026-03-01"),
+        ("old-plan", "FLOOR_PLAN", layout_id, "2026-01-01"),
+        ("new-plan", "FLOOR_PLAN", layout_id, "2026-02-01"),
+    ):
+        made[name] = connection.execute(
+            text(
+                "INSERT INTO files (property_id, layout_id, kind, bucket, object_path,"
+                " original_name, content_type, size_bytes, created_at)"
+                " VALUES (:p, :l, :k, 'property-files', :path, :name, 'image/png', 10, :c)"
+                " RETURNING id"
+            ),
+            {
+                "p": property_id,
+                "l": layout,
+                "k": kind,
+                "path": f"x/{name}.png",
+                "name": name,
+                "c": created,
+            },
+        ).scalar_one()
+    return {name: str(file_id) for name, file_id in made.items()}
+
+
+def files_snapshot(connection: Connection) -> list[dict]:
+    return [
+        row[0] for row in connection.execute(text("SELECT to_jsonb(f) FROM files f ORDER BY f.id"))
+    ]
+
+
+def test_0003_keeps_files_and_marks_the_covers_and_plans_already_in_use(
+    migrations: Config,
+) -> None:
+    command.downgrade(migrations, "0002")
+    with get_engine().begin() as connection:
+        insert_legacy_data(connection)
+        made = insert_files(connection)
+        before = files_snapshot(connection)
+
+    command.upgrade(migrations, "0003")
+    with get_engine().connect() as connection:
+        after = files_snapshot(connection)
+    for old, new in zip(before, after, strict=True):
+        assert {key: value for key, value in new.items() if key not in NEW_FILE_COLUMNS} == old
+        assert (new["caption"], new["sort_order"], new["asset_id"]) == (None, 0, None)
+    primary = {row["original_name"] for row in after if row["is_primary"]}
+    # The newest MAIN of the property, and the newest plan of the layout: what the app showed.
+    assert primary == {"new-cover", "new-plan"}
+    assert made  # ids exist
+
+    command.downgrade(migrations, "0002")
+    with get_engine().connect() as connection:
+        assert files_snapshot(connection) == before
+
+
+@pytest.mark.parametrize(
+    ("change", "refused"),
+    [
+        ("caption = 'Lobby'", True),
+        ("category = 'Exterior'", True),
+        ("description = 'North face'", True),
+        ("sort_order = 2", True),
+        ("is_primary = false", False),  # a cover choice is dropped, re-derived on upgrade
+        ("width_px = 10, height_px = 10", False),
+    ],
+)
+def test_0003_downgrade_refuses_to_discard_file_details(
+    migrations: Config, change: str, refused: bool
+) -> None:
+    with get_engine().begin() as connection:
+        insert_legacy_data(connection)
+        insert_files(connection)
+        connection.execute(
+            text(f"UPDATE files SET {change} WHERE original_name = 'gallery'")  # noqa: S608
+        )
+    if refused:
+        with pytest.raises(DBAPIError, match="Cannot downgrade past 0003: 1 file"):
+            command.downgrade(migrations, "0002")
+        assert current_revision() == "0003"
+    else:
+        command.downgrade(migrations, "0002")
+        assert current_revision() == "0002"
+
+
+def test_0003_downgrade_refuses_while_assets_have_images(migrations: Config) -> None:
+    with get_engine().begin() as connection:
+        insert_legacy_data(connection)
+        property_id = connection.execute(text("SELECT id FROM properties")).scalar_one()
+        asset_id = connection.execute(
+            text(
+                "INSERT INTO assets (property_id, name, category) VALUES (:p, 'Desk', 'FURNITURE')"
+                " RETURNING id"
+            ),
+            {"p": property_id},
+        ).scalar_one()
+        connection.execute(
+            text(
+                "INSERT INTO files (property_id, asset_id, kind, bucket, object_path,"
+                " original_name, content_type, size_bytes)"
+                " VALUES (:p, :a, 'ASSET', 'b', 'x/desk.png', 'desk.png', 'image/png', 1)"
+            ),
+            {"p": property_id, "a": asset_id},
+        )
+    with pytest.raises(DBAPIError, match="Cannot downgrade past 0003"):
+        command.downgrade(migrations, "0002")
+    assert current_revision() == "0003"
+
+
+def test_revision_0003_renders_as_sql_without_a_database(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command.upgrade(alembic_config(), "0002:0003", sql=True)
+    upgrade = capsys.readouterr().out
+    command.downgrade(alembic_config(), "0003:0002", sql=True)
+    downgrade = capsys.readouterr().out
+
+    assert "ALTER TABLE files ADD COLUMN asset_id UUID" in upgrade
+    assert "NULLS NOT DISTINCT" in upgrade and "WHERE is_primary" in upgrade
+    assert "UPDATE alembic_version SET version_num='0003'" in upgrade
+    # Additive: only the kind list is replaced; rows are only ever flagged, never removed.
+    assert upgrade.count("DROP ") == 1 and "DROP CONSTRAINT ck_files_kind_valid" in upgrade
+    assert "DELETE FROM" not in upgrade and "TRUNCATE" not in upgrade
+    assert upgrade.index("UPDATE files SET is_primary") < upgrade.index(
+        "CREATE UNIQUE INDEX uq_files_primary_per_owner"
+    )
+    assert downgrade.index("Cannot downgrade past 0003") < downgrade.index("DROP COLUMN")

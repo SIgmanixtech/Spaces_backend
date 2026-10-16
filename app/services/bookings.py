@@ -8,13 +8,21 @@ Rules
   CONFIRMED -> COMPLETED | CANCELLED. CANCELLED and COMPLETED are final.
 * A space cannot be booked while another tenant occupies it (or its whole
   property) on any day the booking touches.
+* Spaces nest (floor > portion > room > desk). A booking also conflicts with
+  bookings of every space containing it and every space inside it, and an
+  occupancy of any of those blocks it: booking portion 5A takes its desks, and
+  a booked desk keeps 5A from being booked whole. A space inside one that is
+  not ACTIVE cannot be booked either.
 
 Concurrency
 -----------
-Creating or rescheduling locks the space row, so requests for the same space
-run one at a time and each sees the others' committed bookings. The database's
-exclusion constraint remains the final guard: if anything slips past the
-check, the insert fails and the caller gets 409, never a double booking.
+Creating or rescheduling locks the property row, then the space row. Requests
+for the same property therefore run one at a time, each seeing the others'
+committed bookings, so a portion and a desk inside it cannot be booked by two
+simultaneous requests. Moving spaces takes the same property lock, so the
+hierarchy cannot change while a booking is checked. The database's exclusion
+constraint remains the final guard for the same space: if anything slips past
+the check, the insert fails and the caller gets 409, never a double booking.
 """
 
 import uuid
@@ -38,6 +46,7 @@ from app.repositories.base import order_by_clause, paginate_rows, text_search
 from app.schemas.booking import AvailabilityRead, BookingConflict, BookingRead
 from app.schemas.common import ListQuery
 from app.services.base import commit, flush, log_activity, require
+from app.services.hierarchy import Family, family
 from app.services.occupancy import OPEN_BOOKING_STATUSES
 
 MAX_DURATION = timedelta(days=366)
@@ -119,28 +128,42 @@ class BookingService:
         self._check_years(start_at, end_at)
         space = require(self.session, Space, space_id, "Space")
         prop = self.session.get(Property, space.property_id)
-        conflicts = self._overlapping(space.id, start_at, end_at, exclude_booking_id)
+        kin = family(self.session, space)
+        conflicts = self._overlapping([space.id], start_at, end_at, exclude_booking_id)
+        related = self._overlapping(sorted(kin.related), start_at, end_at, exclude_booking_id)
 
         if prop is None or prop.archived_at is not None or prop.status != PropertyStatus.ACTIVE:
             message = "The property is not open for bookings."
         elif space.operational_status != SpaceOperationalStatus.ACTIVE:
             message = "The space is not open for bookings."
+        elif closed := self._closed_container(kin):
+            message = f'The space is inside "{closed.name}", which is not open for bookings.'
         elif conflicts:
             message = "The space is already booked for part of that time."
-        elif self._occupied_by_other(space, start_at, end_at, tenant_id=None):
+        elif related:
+            message = self._related_message(kin, related[0])
+        elif self._occupied_by_other(space, start_at, end_at, tenant_id=None, kin=kin):
             message = "The space is occupied by a tenant during that time."
         else:
             return AvailabilityRead(available=True, message="The space is available.", conflicts=[])
+        found = [*conflicts, *related]
+        names = self._names([booking.space_id for booking in found])
         return AvailabilityRead(
             available=False,
             message=message,
-            conflicts=[BookingConflict.model_validate(booking) for booking in conflicts],
+            conflicts=[
+                BookingConflict.model_validate(booking).model_copy(
+                    update={"space_name": names.get(booking.space_id)}
+                )
+                for booking in found
+            ],
         )
 
     # --- writes ----------------------------------------------------------
 
     def create(self, values: dict[str, Any]) -> BookingRead:
         prop = require(self.session, Property, values["property_id"], "Property")
+        self._lock_property(prop.id)
         space = self._lock_space(values["space_id"])
         if space.property_id != prop.id:
             raise BadRequestError("The space does not belong to this property.")
@@ -180,6 +203,7 @@ class BookingService:
         if rescheduled:
             if end_at <= start_at:
                 raise BadRequestError("end_at must be after start_at.")
+            self._lock_property(booking.property_id)
             space = self._lock_space(booking.space_id)
             self._check_window(start_at, end_at)
             self._ensure_free(space, start_at, end_at, tenant_id, exclude_id=booking.id)
@@ -217,6 +241,37 @@ class BookingService:
         if booking is None:
             raise NotFoundError("Booking not found.")
         return booking
+
+    def _lock_property(self, property_id: uuid.UUID) -> None:
+        self.session.execute(
+            select(Property.id).where(Property.id == property_id).with_for_update()
+        )
+
+    def _closed_container(self, kin: Family) -> Space | None:
+        """The nearest containing space that is not operationally ACTIVE."""
+        for space_id in kin.ancestors:
+            container = self.session.get(Space, space_id)
+            if (
+                container is not None
+                and container.operational_status != SpaceOperationalStatus.ACTIVE
+            ):
+                return container
+        return None
+
+    def _related_message(self, kin: Family, booking: Booking) -> str:
+        name = self._names([booking.space_id]).get(booking.space_id, "another space")
+        return (
+            f'Part of that time is already booked on "{name}", which '
+            f"{kin.relation(booking.space_id)} this space."
+        )
+
+    def _names(self, space_ids: Sequence[uuid.UUID]) -> dict[uuid.UUID, str]:
+        if not space_ids:
+            return {}
+        rows = self.session.execute(
+            select(Space.id, Space.name).where(Space.id.in_(set(space_ids)))
+        )
+        return {space_id: name for space_id, name in rows}
 
     def _lock_space(self, space_id: uuid.UUID) -> Space:
         space = self.session.scalar(
@@ -260,15 +315,17 @@ class BookingService:
 
     def _overlapping(
         self,
-        space_id: uuid.UUID,
+        space_ids: Sequence[uuid.UUID],
         start_at: datetime,
         end_at: datetime,
         exclude_id: uuid.UUID | None,
     ) -> Sequence[Booking]:
+        if not space_ids:
+            return []
         statement = (
             select(Booking)
             .where(
-                Booking.space_id == space_id,
+                Booking.space_id.in_(space_ids),
                 Booking.status != BookingStatus.CANCELLED,
                 Booking.start_at < end_at,
                 Booking.end_at > start_at,
@@ -280,15 +337,25 @@ class BookingService:
         return self.session.scalars(statement).all()
 
     def _occupied_by_other(
-        self, space: Space, start_at: datetime, end_at: datetime, tenant_id: uuid.UUID | None
+        self,
+        space: Space,
+        start_at: datetime,
+        end_at: datetime,
+        tenant_id: uuid.UUID | None,
+        kin: Family | None = None,
     ) -> bool:
+        kin = kin or family(self.session, space)
         zone = ZoneInfo(get_settings().business_timezone)
         first_day = start_at.astimezone(zone).date()
         # end_at is exclusive, so a booking ending at midnight does not touch the next day.
         last_day = (end_at.astimezone(zone) - timedelta(microseconds=1)).date()
         conditions = [
             TenantOccupancy.property_id == space.property_id,
-            or_(TenantOccupancy.space_id == space.id, TenantOccupancy.space_id.is_(None)),
+            # The space, anything containing it or inside it, or the whole property.
+            or_(
+                TenantOccupancy.space_id.in_([space.id, *kin.related]),
+                TenantOccupancy.space_id.is_(None),
+            ),
             TenantOccupancy.start_date <= last_day,
             or_(TenantOccupancy.end_date.is_(None), TenantOccupancy.end_date >= first_day),
         ]
@@ -304,10 +371,20 @@ class BookingService:
         tenant_id: uuid.UUID | None,
         exclude_id: uuid.UUID | None = None,
     ) -> None:
-        if self._overlapping(space.id, start_at, end_at, exclude_id):
+        kin = family(self.session, space)
+        if closed := self._closed_container(kin):
+            self.session.rollback()
+            raise ConflictError(
+                f'The space is inside "{closed.name}", which is not open for bookings.'
+            )
+        if self._overlapping([space.id], start_at, end_at, exclude_id):
             self.session.rollback()
             raise ConflictError("The space is already booked for part of that time.")
-        if self._occupied_by_other(space, start_at, end_at, tenant_id):
+        if related := self._overlapping(sorted(kin.related), start_at, end_at, exclude_id):
+            message = self._related_message(kin, related[0])
+            self.session.rollback()
+            raise ConflictError(message)
+        if self._occupied_by_other(space, start_at, end_at, tenant_id, kin=kin):
             self.session.rollback()
             raise ConflictError("The space is occupied by a tenant during that time.")
 

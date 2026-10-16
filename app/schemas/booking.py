@@ -80,6 +80,9 @@ class BookingConflict(ReadSchema):
     start_at: datetime
     end_at: datetime
     status: BookingStatus
+    space_id: uuid.UUID | None = None
+    # The space the conflicting booking is on: this one, or one containing or inside it.
+    space_name: str | None = None
 
 
 class AvailabilityRead(ReadSchema):

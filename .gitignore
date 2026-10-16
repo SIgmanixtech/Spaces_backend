@@ -25,3 +25,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Local file storage used in development and tests
+var/

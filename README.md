@@ -21,7 +21,7 @@ database directly.
 | G | Authentication, authorization, full test suite | Not started |
 | H | Frontend integration readiness | Frontend connected for local development |
 
-File uploads are not implemented yet. The schema lives in
+File uploads are implemented (`/files`, see [Storage configuration](#storage-configuration)). The schema lives in
 `app/models/` and `migrations/versions/`.
 
 ## Technology stack
@@ -104,6 +104,9 @@ missing or invalid setting. Secret values are never printed.
 | `SUPABASE_PUBLISHABLE_KEY` | for sign-in | Browser-safe key used to call Supabase Auth |
 | `SUPABASE_SECRET_KEY` | for Storage | Server-side key. Never send to the browser |
 | `PROPERTY_STORAGE_BUCKET` | no (`property-files`) | Private bucket for images and documents |
+| `STORAGE_BACKEND` | no (`supabase`) | `supabase`, or `local` for development and tests only |
+| `LOCAL_STORAGE_DIR` | no (`var/uploads`) | Folder used when `STORAGE_BACKEND=local` |
+| `MAX_UPLOAD_MB` | no (`10`) | Largest upload accepted |
 | `SUPABASE_JWT_AUDIENCE` | no (`authenticated`) | Expected audience of access tokens |
 | `SUPABASE_JWT_SECRET` | legacy projects only | Shared secret for HS256-signed tokens |
 | `CORS_ALLOWED_ORIGINS` | yes for browsers | Comma-separated exact origins |
@@ -345,9 +348,27 @@ dev server actually prints when it starts.
 
 ## Storage configuration
 
-Not implemented yet (Phase F). Planned: a private bucket named by
-`PROPERTY_STORAGE_BUCKET`, uploads proxied through this API, file metadata in
-PostgreSQL, and short-lived signed URLs for downloads.
+Images and documents are stored as objects; PostgreSQL keeps only their metadata
+(the `files` table: owner, kind, name, type, size). Links to the bytes are signed
+and expire after ten minutes, so the frontend asks the API again for fresh ones.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /files` | Multipart upload: `file`, `kind`, `property_id`, and optionally one of `building_id`, `layout_id`, `space_id` |
+| `GET /files` | List, filtered by `property_id`, `building_id`, `layout_id`, `space_id`, `kind`; each item has a fresh `url` |
+| `GET /files/{id}` | One file with a fresh `url` |
+| `DELETE /files/{id}` | Removes the record, then the stored bytes |
+
+- **Accepted:** JPG, PNG and WebP; PDF too for `FLOOR_PLAN` and `DOCUMENT`. The
+  type is read from the file's content, not its name. Larger than `MAX_UPLOAD_MB`
+  answers `413`, any other type `415`.
+- **Kinds:** `MAIN`, `GALLERY`, `BUILDING`, `INTERIOR`, `WORKSPACE`, `FLOOR_PLAN`, `DOCUMENT`.
+- **Supabase (production):** set `SUPABASE_SECRET_KEY` (server-side only) and create a
+  private bucket named by `PROPERTY_STORAGE_BUCKET`. Without the key every file
+  endpoint answers `503`; nothing else is affected.
+- **Local (`STORAGE_BACKEND=local`):** files go to `LOCAL_STORAGE_DIR` and the API
+  serves them at `/files/local/...` to holders of a valid signed link. For
+  development and tests only. The e2e test server uses a throwaway folder.
 
 ## Frontend integration
 
@@ -389,7 +410,7 @@ Lovable, and the preview's origin added to `CORS_ALLOWED_ORIGINS`.
 
 ## Known limitations
 
-- File storage is not implemented yet, so images and documents chosen in the frontend's property form are not uploaded.
+- Captions, categories, ordering and a primary flag for images are not stored yet; only the file's kind and owner are.
 - Every table has row level security enabled with no policies, so Supabase's
   Data API cannot read or write them. All access goes through this backend.
 - Starlette's test client warns that its `httpx` backend is deprecated in favour

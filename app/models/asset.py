@@ -1,7 +1,15 @@
 import uuid
 from datetime import date
 
-from sqlalchemy import CheckConstraint, Date, ForeignKey, ForeignKeyConstraint, String, Text
+from sqlalchemy import (
+    CheckConstraint,
+    Date,
+    ForeignKey,
+    ForeignKeyConstraint,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -15,6 +23,8 @@ class Asset(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "assets"
     __table_args__ = (
         enum_check("status", AssetStatus),
+        # Lets a file name the asset together with its property (files.asset_id).
+        UniqueConstraint("id", "property_id", name="uq_assets_id_property"),
         # Any building, floor or space named must belong to the asset's property.
         ForeignKeyConstraint(
             ["building_id", "property_id"],
