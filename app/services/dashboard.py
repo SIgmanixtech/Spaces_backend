@@ -35,6 +35,7 @@ from app.schemas.dashboard import (
 )
 from app.services.occupancy import (
     business_today,
+    holds_inventory,
     is_rentable_unit,
     property_occupancy,
     space_statuses,
@@ -114,7 +115,7 @@ def _occupancy_trend(session: Session, today: date) -> list[OccupancyTrendPoint]
             TenantOccupancy.space_id,
             TenantOccupancy.start_date,
             TenantOccupancy.end_date,
-        )
+        ).where(holds_inventory())
     ).all()
 
     points = []

@@ -545,4 +545,5 @@ def test_database_rejects_moving_a_space_to_another_property(
             text("UPDATE spaces SET property_id = :p WHERE id = :desk"),
             {"p": other_property, "desk": ids["desk"]},
         )
-    assert raised.value.orig.diag.constraint_name == "fk_spaces_building_id_buildings"
+    # Since 0004 a trigger refuses this first; the composite foreign keys still back it up.
+    assert raised.value.orig.diag.constraint_name == "ck_spaces_property_immutable"

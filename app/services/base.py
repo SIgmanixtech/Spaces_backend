@@ -33,6 +33,24 @@ _CONSTRAINT_MESSAGES = {
         "The space is already occupied by another tenant during those dates."
     ),
     "ex_bookings_space_time": "The space is already booked for part of that time.",
+    "ex_allocation_claims_exclusive": (
+        "The space is already booked or contracted for part of that time."
+    ),
+    "ex_allocation_claims_mixed": (
+        "The space, or a space containing it or inside it, is already booked or contracted "
+        "for part of that time."
+    ),
+    "ck_allocation_claim_chain": (
+        "The space hierarchy changed while this request was running. Nothing was saved; try again."
+    ),
+    "ck_spaces_move_blocked": (
+        "The space, or a space inside it, has active or future bookings or contracts, so it "
+        "cannot be moved."
+    ),
+    "ck_spaces_change_blocked": (
+        "The space, or a space inside it, has active or future bookings or contracts, so it "
+        "cannot be archived."
+    ),
 }
 
 
@@ -71,18 +89,23 @@ def log_activity(
     entity_id: uuid.UUID | None,
     property_id: uuid.UUID | None,
     message: str,
+    at: datetime | None = None,
 ) -> None:
-    """Record a change in the same transaction as the change itself."""
-    session.add(
-        ActivityLog(
-            actor_id=actor.id if actor else None,
-            action=action,
-            entity_type=entity_type,
-            entity_id=entity_id,
-            property_id=property_id,
-            message=message[:500],
-        )
+    """Record a change in the same transaction as the change itself.
+
+    ``at`` stamps the entry with the moment of the step instead of the transaction's
+    start, which keeps several steps of one transaction in order."""
+    entry = ActivityLog(
+        actor_id=actor.id if actor else None,
+        action=action,
+        entity_type=entity_type,
+        entity_id=entity_id,
+        property_id=property_id,
+        message=message[:500],
     )
+    if at is not None:
+        entry.created_at = at
+    session.add(entry)
 
 
 # Upper bound on rows loaded when a list is filtered by a derived (computed) value.

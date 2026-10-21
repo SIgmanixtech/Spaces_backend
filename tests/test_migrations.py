@@ -51,10 +51,13 @@ def migrations(migrated_database: None) -> Iterator[Config]:
         yield alembic_config()
     finally:
         dispose_engine()
+        # Upgrade first: a test may leave an older revision, which lacks tables
+        # added since (0004's allocations), and the truncate names every table.
+        command.upgrade(alembic_config(), "head")
+        dispose_engine()
         tables = ", ".join(table.name for table in Base.metadata.sorted_tables)
         with get_engine().begin() as connection:
             connection.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
-        command.upgrade(alembic_config(), "head")
         dispose_engine()
 
 
@@ -350,6 +353,7 @@ def test_0003_keeps_files_and_marks_the_covers_and_plans_already_in_use(
 def test_0003_downgrade_refuses_to_discard_file_details(
     migrations: Config, change: str, refused: bool
 ) -> None:
+    command.downgrade(migrations, "0003")
     with get_engine().begin() as connection:
         insert_legacy_data(connection)
         insert_files(connection)
@@ -366,6 +370,7 @@ def test_0003_downgrade_refuses_to_discard_file_details(
 
 
 def test_0003_downgrade_refuses_while_assets_have_images(migrations: Config) -> None:
+    command.downgrade(migrations, "0003")
     with get_engine().begin() as connection:
         insert_legacy_data(connection)
         property_id = connection.execute(text("SELECT id FROM properties")).scalar_one()
@@ -407,3 +412,187 @@ def test_revision_0003_renders_as_sql_without_a_database(
         "CREATE UNIQUE INDEX uq_files_primary_per_owner"
     )
     assert downgrade.index("Cannot downgrade past 0003") < downgrade.index("DROP COLUMN")
+
+
+# --- revision 0004: contracts and the allocation engine --------------------------------
+
+
+def floor_with_portion(connection: Connection) -> dict[str, object]:
+    """Floor 5 > Portion 5A > Desk, shaped as revision 0003 stores them."""
+    ids: dict[str, object] = {}
+    ids["property"] = connection.execute(
+        text(
+            "INSERT INTO properties (name, property_type, category, address, city, state,"
+            " postal_code) VALUES ('Sigma Hub', 'COMMERCIAL', 'OFFICE', '1 Road', 'Hyderabad',"
+            " 'Telangana', '500001') RETURNING id"
+        )
+    ).scalar_one()
+    ids["building"] = connection.execute(
+        text("INSERT INTO buildings (property_id, name) VALUES (:p, 'A') RETURNING id"),
+        {"p": ids["property"]},
+    ).scalar_one()
+    ids["floor"] = connection.execute(
+        text(
+            "INSERT INTO floors (building_id, name, level_number) VALUES (:b, 'Fifth', 5)"
+            " RETURNING id"
+        ),
+        {"b": ids["building"]},
+    ).scalar_one()
+    ids["root"] = connection.execute(
+        text(
+            "INSERT INTO spaces (property_id, building_id, floor_id, name, space_type, depth,"
+            " is_rentable) VALUES (:p, :b, :f, 'Floor 5', 'FLOOR', 0, false) RETURNING id"
+        ),
+        {"p": ids["property"], "b": ids["building"], "f": ids["floor"]},
+    ).scalar_one()
+    ids["5A"] = connection.execute(
+        text(
+            "INSERT INTO spaces (property_id, building_id, floor_id, parent_space_id, depth,"
+            " parent_depth, name, space_type) VALUES (:p, :b, :f, :r, 1, 0, '5A', 'PORTION')"
+            " RETURNING id"
+        ),
+        {"p": ids["property"], "b": ids["building"], "f": ids["floor"], "r": ids["root"]},
+    ).scalar_one()
+    ids["desk"] = connection.execute(
+        text(
+            "INSERT INTO spaces (property_id, building_id, floor_id, parent_space_id, depth,"
+            " parent_depth, name, space_type) VALUES (:p, :b, :f, :a, 2, 1, 'Desk', 'DESK')"
+            " RETURNING id"
+        ),
+        {"p": ids["property"], "b": ids["building"], "f": ids["floor"], "a": ids["5A"]},
+    ).scalar_one()
+    ids["tenant"] = connection.execute(
+        text("INSERT INTO tenants (name) VALUES ('Acme') RETURNING id")
+    ).scalar_one()
+    return ids
+
+
+def legacy_booking(
+    connection: Connection,
+    ids: dict,
+    space: str,
+    start: str,
+    end: str,
+    status: str = "CONFIRMED",
+) -> object:
+    return connection.execute(
+        text(
+            "INSERT INTO bookings (property_id, space_id, customer_name, start_at, end_at, status)"
+            " VALUES (:p, :s, 'Legacy', :a, :b, :st) RETURNING id"
+        ),
+        {"p": ids["property"], "s": ids[space], "a": start, "b": end, "st": status},
+    ).scalar_one()
+
+
+def test_0004_turns_occupancies_into_contracts_and_allocates_current_holds(
+    migrations: Config,
+) -> None:
+    command.downgrade(migrations, "0003")
+    with get_engine().begin() as connection:
+        ids = floor_with_portion(connection)
+        future = legacy_booking(
+            connection, ids, "desk", "2031-01-06 09:00+00", "2031-01-06 10:00+00"
+        )
+        legacy_booking(connection, ids, "desk", "2020-01-06 09:00+00", "2020-01-06 10:00+00")
+        legacy_booking(
+            connection, ids, "5A", "2031-01-06 09:00+00", "2031-01-06 10:00+00", "CANCELLED"
+        )
+        occupancy = connection.execute(
+            text(
+                "INSERT INTO tenant_occupancies (tenant_id, property_id, space_id, start_date)"
+                " VALUES (:t, :p, :s, '2032-01-01') RETURNING id"
+            ),
+            {"t": ids["tenant"], "p": ids["property"], "s": ids["5A"]},
+        ).scalar_one()
+
+    command.upgrade(migrations, "0004")
+    with get_engine().connect() as connection:
+        contract = connection.execute(
+            text("SELECT reference, status, activated_at IS NOT NULL FROM tenant_occupancies")
+        ).one()
+        assert contract[0].startswith("CT-") and tuple(contract[1:]) == ("ACTIVE", True)
+        allocations = connection.execute(
+            text("SELECT source_type, booking_id, contract_id FROM allocations ORDER BY 1")
+        ).all()
+        # The future booking and the contract; not the past or the cancelled booking.
+        assert [(a[0], a[1] or a[2]) for a in allocations] == [
+            ("BOOKING", future),
+            ("CONTRACT", occupancy),
+        ]
+        chain = connection.execute(
+            text(
+                "SELECT s.name, c.claim_mode FROM allocation_claims c"
+                " JOIN allocations a ON a.id = c.allocation_id JOIN spaces s ON s.id = c.space_id"
+                " WHERE a.booking_id = :b ORDER BY c.claim_mode, s.name"
+            ),
+            {"b": future},
+        ).all()
+        assert [tuple(row) for row in chain] == [("Desk", 1), ("5A", 2), ("Floor 5", 2)]
+
+
+def test_0004_refuses_to_upgrade_over_existing_hierarchy_conflicts(migrations: Config) -> None:
+    command.downgrade(migrations, "0003")
+    with get_engine().begin() as connection:
+        ids = floor_with_portion(connection)
+        legacy_booking(connection, ids, "desk", "2031-01-06 09:00+00", "2031-01-06 10:00+00")
+        legacy_booking(connection, ids, "5A", "2031-01-06 09:30+00", "2031-01-06 11:00+00")
+
+    with pytest.raises(DBAPIError, match="Cannot upgrade to 0004: 1 pair"):
+        command.upgrade(migrations, "0004")
+    assert current_revision() == "0003"
+    # Resolved deliberately, the upgrade goes through.
+    with get_engine().begin() as connection:
+        connection.execute(
+            text("UPDATE bookings SET status = 'CANCELLED' WHERE space_id = :s"), {"s": ids["5A"]}
+        )
+    command.upgrade(migrations, "0004")
+    assert current_revision() == "0004"
+
+
+@pytest.mark.parametrize(
+    ("change", "refused"),
+    [
+        ("status = 'PENDING'", True),
+        ("status = 'CANCELLED', cancelled_at = now()", True),
+        ("terms = 'Lock-in 12 months'", True),
+        ("monthly_rent = 50000", True),
+        ("notes = 'Plain note'", False),
+    ],
+)
+def test_0004_downgrade_refuses_to_discard_contract_data(
+    migrations: Config, change: str, refused: bool
+) -> None:
+    with get_engine().begin() as connection:
+        ids = floor_with_portion(connection)
+        connection.execute(
+            text(
+                "INSERT INTO tenant_occupancies (tenant_id, property_id, start_date)"
+                " VALUES (:t, :p, '2032-01-01')"
+            ),
+            {"t": ids["tenant"], "p": ids["property"]},
+        )
+        connection.execute(text(f"UPDATE tenant_occupancies SET {change}"))  # noqa: S608
+    if refused:
+        with pytest.raises(DBAPIError, match="Cannot downgrade past 0004: 1 contract"):
+            command.downgrade(migrations, "0003")
+        assert current_revision() == "0004"
+    else:
+        command.downgrade(migrations, "0003")
+        assert current_revision() == "0003"
+
+
+def test_revision_0004_renders_as_sql_without_a_database(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command.upgrade(alembic_config(), "0003:0004", sql=True)
+    upgrade = capsys.readouterr().out
+    command.downgrade(alembic_config(), "0004:0003", sql=True)
+    downgrade = capsys.readouterr().out
+
+    assert "CREATE TABLE allocations" in upgrade and "CREATE TABLE allocation_claims" in upgrade
+    assert "ex_allocation_claims_mixed" in upgrade and "trg_spaces_guard" in upgrade
+    assert "Cannot upgrade to 0004" in upgrade
+    assert "UPDATE alembic_version SET version_num='0004'" in upgrade
+    # Nothing is deleted; only the old one-occupant exclusion is replaced.
+    assert "DELETE FROM" not in upgrade and "TRUNCATE" not in upgrade
+    assert downgrade.index("Cannot downgrade past 0004") < downgrade.index("DROP TABLE")

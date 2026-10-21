@@ -37,6 +37,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.models.booking import Booking
 from app.models.enums import (
+    HOLDING_CONTRACT_STATUSES,
     BookingStatus,
     OccupancyStatus,
     PropertyStatus,
@@ -68,8 +69,14 @@ def is_rentable_unit() -> ColumnElement[bool]:
     return and_(Space.is_rentable, Space.space_type != SpaceType.FLOOR)
 
 
+def holds_inventory() -> ColumnElement[bool]:
+    """Contracts that hold their dates: ACTIVE or TERMINATED, not PENDING or CANCELLED."""
+    return TenantOccupancy.status.in_(HOLDING_CONTRACT_STATUSES)
+
+
 def occupancy_covers(day: date) -> ColumnElement[bool]:
     return and_(
+        holds_inventory(),
         TenantOccupancy.start_date <= day,
         or_(TenantOccupancy.end_date.is_(None), TenantOccupancy.end_date >= day),
     )

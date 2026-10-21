@@ -1,7 +1,8 @@
 """The schema and API as they are today (revision 0001), for comparison with the proposal.
 
-The ``test_gap_*`` tests assert behaviour the audit called a defect. They pass
-while the defect exists and are meant to be inverted when it is fixed.
+The ``test_gap_*`` tests asserted behaviour the audit called a defect, and were
+meant to be inverted when it was fixed. Revision 0004 (the allocation engine and
+contracts) fixed all three, so they are now ``test_fixed_*`` and assert the refusal.
 """
 
 import threading
@@ -73,17 +74,23 @@ def test_existing_exclusion_constraint_is_safe_under_raw_concurrency(db_session:
         for result in outcomes:
             seen[result] = seen.get(result, 0) + 1
 
-    assert db_session.scalar(select(func.count()).select_from(Booking)) == rounds
+    # Only this test's space: other tests or an e2e run may have left bookings behind.
+    assert (
+        db_session.scalar(
+            select(func.count()).select_from(Booking).where(Booking.space_id == space_id)
+        )
+        == rounds
+    )
     print(f"existing ex_bookings_space_time, {rounds} rounds x {attempts}: {seen}")
 
 
-def test_gap_an_occupancy_can_be_created_over_an_existing_booking(
+def test_fixed_an_occupancy_cannot_be_created_over_an_existing_booking(
     api: TestClient,
     room: dict,  # noqa: F811
 ) -> None:
     booking = book(api, room, status="CONFIRMED")
     tenant = post(api, "tenants", {"name": "Acme Ltd"})
-    occupancy = post(
+    refused = post(
         api,
         f"tenants/{tenant['id']}/occupancies",
         {
@@ -91,23 +98,27 @@ def test_gap_an_occupancy_can_be_created_over_an_existing_booking(
             "space_id": room["id"],
             "start_date": date.today().isoformat(),
         },
+        409,
     )
-    # Both now hold the same room for the booking's hour.
-    assert occupancy["space_id"] == booking["space_id"]
-    assert api.get(f"/api/v1/bookings/{booking['id']}").json()["status"] == "CONFIRMED"
+    # The booking is named, and it alone holds the room.
+    assert refused["conflicts"][0]["reference"] == booking["reference"]
+    assert api.get(f"/api/v1/tenants/{tenant['id']}/occupancies").json() == []
 
 
-def test_gap_two_tenants_can_occupy_the_whole_property_at_once(
+def test_fixed_two_tenants_cannot_occupy_the_whole_property_at_once(
     api: TestClient,
     room: dict,  # noqa: F811
 ) -> None:
     body = {"property_id": room["property_id"], "start_date": date.today().isoformat()}
-    for name in ("Acme Ltd", "Globex Ltd"):
-        tenant = post(api, "tenants", {"name": name})
-        assert post(api, f"tenants/{tenant['id']}/occupancies", body)["space_id"] is None
+    first = post(api, "tenants", {"name": "Acme Ltd"})
+    held = post(api, f"tenants/{first['id']}/occupancies", body)
+    assert held["space_id"] is None
+    second = post(api, "tenants", {"name": "Globex Ltd"})
+    refused = post(api, f"tenants/{second['id']}/occupancies", body, 409)
+    assert held["reference"] in refused["detail"]
 
 
-def test_gap_whole_property_and_single_space_occupancies_can_overlap(
+def test_fixed_whole_property_and_single_space_occupancies_cannot_overlap(
     api: TestClient,
     room: dict,  # noqa: F811
 ) -> None:
@@ -119,9 +130,10 @@ def test_gap_whole_property_and_single_space_occupancies_can_overlap(
         {"property_id": room["property_id"], "start_date": today},
     )
     single = post(api, "tenants", {"name": "Globex Ltd"})
-    occupancy = post(
+    refused = post(
         api,
         f"tenants/{single['id']}/occupancies",
         {"property_id": room["property_id"], "space_id": room["id"], "start_date": today},
+        409,
     )
-    assert occupancy["space_id"] == room["id"]
+    assert "whole property" in refused["detail"]

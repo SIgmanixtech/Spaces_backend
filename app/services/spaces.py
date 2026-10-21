@@ -23,11 +23,13 @@ from app.models.property import Property
 from app.models.space import Space
 from app.models.tenant import TenantOccupancy
 from app.schemas.space import SpaceRead
-from app.services.base import CrudService, commit, require
+from app.services.allocations import AllocationEngine
+from app.services.base import CrudService, commit, flush, require
 from app.services.locations import check_layout
 from app.services.occupancy import (
     OPEN_BOOKING_STATUSES,
     business_today,
+    holds_inventory,
     is_rentable_unit,
     occupancy_covers,
     space_statuses,
@@ -218,6 +220,7 @@ class SpaceService(CrudService[Space]):
                 "upcoming occupancy, so it cannot be moved."
             )
 
+        was_unassigned = space.floor_id is None
         for member in subtree:
             member.building_id = target["building_id"]
             member.floor_id = target["floor_id"]
@@ -226,6 +229,12 @@ class SpaceService(CrudService[Space]):
             member.depth += shift
         space.parent_space_id = target["parent_space_id"]
         space.parent_depth = target["parent_depth"]
+        if was_unassigned:
+            # Holds of the space now also claim the spaces containing it. That is refused,
+            # naming what is in the way, if one of those is held for the same time.
+            flush(self.session)
+            engine = AllocationEngine(self.session)
+            engine.rebuild_claims(engine.live_allocation_ids([m.id for m in subtree]))
         self._log("moved", space)
         commit(self.session)
         return space
@@ -272,6 +281,7 @@ class SpaceService(CrudService[Space]):
         )
         occupied = exists().where(
             TenantOccupancy.space_id.in_(space_ids),
+            holds_inventory(),
             or_(
                 TenantOccupancy.end_date.is_(None),
                 TenantOccupancy.end_date >= business_today(now),

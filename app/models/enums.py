@@ -108,3 +108,29 @@ class FileKind(StrEnum):
     FLOOR_PLAN = "FLOOR_PLAN"
     DOCUMENT = "DOCUMENT"
     ASSET = "ASSET"
+
+
+class ContractStatus(StrEnum):
+    """Stored lifecycle of a contract (a tenant occupancy).
+
+    PENDING     drafted; holds no inventory
+    ACTIVE      holds its space (and everything inside it) for its dates
+    CANCELLED   withdrawn before taking effect, or voided; holds nothing
+    TERMINATED  ended early; holds its dates up to the termination date
+
+    EXPIRED is not stored: an ACTIVE contract whose last day has passed reads as EXPIRED.
+    """
+
+    PENDING = "PENDING"
+    ACTIVE = "ACTIVE"
+    CANCELLED = "CANCELLED"
+    TERMINATED = "TERMINATED"
+
+
+# Contract statuses whose dates hold inventory.
+HOLDING_CONTRACT_STATUSES = (ContractStatus.ACTIVE, ContractStatus.TERMINATED)
+
+
+class AllocationSource(StrEnum):
+    BOOKING = "BOOKING"
+    CONTRACT = "CONTRACT"

@@ -8,6 +8,7 @@ from app.api.v1.endpoints import (
     auth,
     bookings,
     buildings,
+    contracts,
     files,
     floors,
     health,
@@ -33,3 +34,4 @@ api_router.include_router(tenants.router)
 api_router.include_router(tenants.occupancy_router)
 api_router.include_router(assets.router)
 api_router.include_router(files.router)
+api_router.include_router(contracts.router)

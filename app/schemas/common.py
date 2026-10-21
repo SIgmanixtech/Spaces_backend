@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, ClassVar, Generic, Literal, Self, TypeVar
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 T = TypeVar("T")
 
@@ -66,11 +66,27 @@ class FieldError(BaseModel):
     message: str
 
 
+class ConflictDetail(BaseModel):
+    """A booking or contract that is in the way of the request."""
+
+    kind: Literal["BOOKING", "CONTRACT"]
+    reference: str
+    status: str
+    space_id: str
+    space_name: str
+    start_at: str
+    end_at: str | None = Field(default=None, description="Null for an open-ended contract.")
+    relation: Literal["same", "contains", "is inside"] = Field(
+        description="Whether it is on the same space, one containing it, or one inside it."
+    )
+
+
 class ErrorResponse(BaseModel):
     detail: str
     code: str
     request_id: str | None = None
     errors: list[FieldError] | None = None
+    conflicts: list[ConflictDetail] | None = None
 
 
 class HealthResponse(BaseModel):

@@ -78,6 +78,10 @@ class OccupancyUpdate(UpdateSchema):
 
 class OccupancyRead(ReadSchema):
     id: uuid.UUID
+    reference: str | None = Field(default=None, description="The contract reference.")
+    status: str | None = Field(
+        default=None, description="Contract status; see GET /contracts/{id} for the full contract."
+    )
     tenant_id: uuid.UUID
     property_id: uuid.UUID
     property_name: str

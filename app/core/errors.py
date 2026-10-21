@@ -9,7 +9,7 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from sqlalchemy.exc import DataError
+from sqlalchemy.exc import DataError, OperationalError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.logging import request_id_ctx
@@ -34,10 +34,18 @@ class AppError(Exception):
     status_code = 500
     code = "internal_error"
 
-    def __init__(self, detail: str, *, errors: list[dict[str, str]] | None = None) -> None:
+    def __init__(
+        self,
+        detail: str,
+        *,
+        errors: list[dict[str, str]] | None = None,
+        conflicts: list[dict[str, object]] | None = None,
+    ) -> None:
         super().__init__(detail)
         self.detail = detail
         self.errors = errors
+        # For 409s from the allocation engine: the bookings or contracts in the way.
+        self.conflicts = conflicts
 
 
 class BadRequestError(AppError):
@@ -86,6 +94,7 @@ def error_response(
     detail: str,
     errors: list[dict[str, str]] | None = None,
     headers: dict[str, str] | None = None,
+    conflicts: list[dict[str, object]] | None = None,
 ) -> JSONResponse:
     body: dict[str, object] = {
         "detail": detail,
@@ -94,14 +103,22 @@ def error_response(
     }
     if errors:
         body["errors"] = errors
+    if conflicts:
+        body["conflicts"] = conflicts
     return JSONResponse(status_code=status_code, content=body, headers=headers)
+
+
+# Deadlock detected, lock not available (lock_timeout), serialization failure.
+RETRYABLE_SQLSTATES = {"40P01", "55P03", "40001"}
 
 
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(AppError)
     async def _app_error(_: Request, exc: AppError) -> JSONResponse:
         headers = {"WWW-Authenticate": "Bearer"} if exc.status_code == 401 else None
-        return error_response(exc.status_code, exc.code, exc.detail, exc.errors, headers)
+        return error_response(
+            exc.status_code, exc.code, exc.detail, exc.errors, headers, exc.conflicts
+        )
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
@@ -114,6 +131,21 @@ def register_exception_handlers(app: FastAPI) -> None:
             for error in exc.errors()
         ]
         return error_response(422, "validation_error", "Request validation failed.", errors)
+
+    @app.exception_handler(OperationalError)
+    async def _operational_error(_: Request, exc: OperationalError) -> JSONResponse:
+        # A deadlock, lock timeout or serialization failure rolled the transaction
+        # back: nothing was saved, and sending the same request again is safe.
+        sqlstate = getattr(exc.orig, "sqlstate", None)
+        if sqlstate in RETRYABLE_SQLSTATES:
+            logger.warning("Concurrent change refused (%s)", sqlstate)
+            return error_response(
+                409,
+                "conflict",
+                "Another change to the same space was being saved at the same time. "
+                "Nothing was saved; try again.",
+            )
+        raise exc
 
     @app.exception_handler(DataError)
     async def _data_error(_: Request, exc: DataError) -> JSONResponse:

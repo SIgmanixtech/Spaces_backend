@@ -76,13 +76,18 @@ class BookingRead(ReadSchema):
 
 
 class BookingConflict(ReadSchema):
+    kind: Literal["BOOKING", "CONTRACT"] = "BOOKING"
     reference: str
     start_at: datetime
-    end_at: datetime
-    status: BookingStatus
+    end_at: datetime | None = Field(description="Null for an open-ended contract.")
+    status: str = Field(description="A booking status, or for a contract its contract status.")
     space_id: uuid.UUID | None = None
-    # The space the conflicting booking is on: this one, or one containing or inside it.
+    # The space the conflicting hold is on: this one, or one containing or inside it.
     space_name: str | None = None
+    relation: Literal["same", "contains", "is inside"] | None = Field(
+        default=None,
+        description="Whether the hold is on this space, a space containing it, or one inside it.",
+    )
 
 
 class AvailabilityRead(ReadSchema):

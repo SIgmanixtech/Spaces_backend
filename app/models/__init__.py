@@ -1,6 +1,7 @@
 """ORM models. Import every model module here so Alembic autogenerate sees it."""
 
 from app.models.activity import ActivityLog
+from app.models.allocation import Allocation, AllocationClaim
 from app.models.amenity import Amenity, PropertyAmenity
 from app.models.asset import Asset
 from app.models.booking import Booking
@@ -14,6 +15,8 @@ from app.models.user import AppUser
 
 __all__ = [
     "ActivityLog",
+    "Allocation",
+    "AllocationClaim",
     "Amenity",
     "AppUser",
     "Asset",
