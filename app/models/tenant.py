@@ -38,6 +38,11 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, ArchivableMixin, Base):
         String(32), nullable=False, server_default=TenantStatus.ACTIVE.value
     )
     notes: Mapped[str | None] = mapped_column(Text)
+    # The customer account that owns this tenant record in the client app. Set when a
+    # customer registers; never taken from a request body. One account, one tenant.
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("app_users.id", ondelete="SET NULL"), unique=True
+    )
 
 
 class TenantOccupancy(UUIDPrimaryKeyMixin, TimestampMixin, Base):

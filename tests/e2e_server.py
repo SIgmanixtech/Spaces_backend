@@ -42,7 +42,7 @@ os.environ.update(
         "LOG_LEVEL": "WARNING",
         "DATABASE_URL": _url,
         "SUPABASE_URL": "http://supabase.test",
-        "CORS_ALLOWED_ORIGINS": "http://localhost:8080,http://localhost:5173",
+        "CORS_ALLOWED_ORIGINS": "http://localhost:8080,http://localhost:8081,http://localhost:5173",
         # Uploads go to a throwaway folder, never to Supabase Storage.
         "STORAGE_BACKEND": "local",
         "LOCAL_STORAGE_DIR": tempfile.mkdtemp(prefix="sigmanix-e2e-uploads-"),
@@ -64,47 +64,62 @@ from app.db.session import get_session_factory  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models.enums import UserRole  # noqa: E402
 from app.models.user import AppUser  # noqa: E402
-from app.services.auth import SupabaseSession, get_auth_gateway  # noqa: E402
+from app.services.auth import SignUp, SupabaseSession, get_auth_gateway  # noqa: E402
 
 ADMIN_ID = uuid.uuid4()
 _key = ec.generate_private_key(ec.SECP256R1())
 
 
 class StandInAuth:
-    """Issues genuinely signed, short-lived tokens for the one test account."""
+    """Issues genuinely signed, short-lived tokens. Knows the fixed admin account and
+    any customer who signs up while the server runs (as Supabase would, with email
+    confirmation switched off)."""
 
     def __init__(self) -> None:
-        self.refresh_tokens: set[str] = set()
+        self.accounts: dict[str, tuple[uuid.UUID, str]] = {E2E_EMAIL: (ADMIN_ID, E2E_PASSWORD)}
+        self.refresh_tokens: dict[str, tuple[uuid.UUID, str]] = {}
 
-    def _issue(self) -> SupabaseSession:
+    def _issue(self, user_id: uuid.UUID = ADMIN_ID, email: str = E2E_EMAIL) -> SupabaseSession:
         now = datetime.now(UTC)
         token = jwt.encode(
             {
-                "sub": str(ADMIN_ID),
+                "sub": str(user_id),
                 "iss": ISSUER,
                 "aud": AUDIENCE,
                 "iat": now,
                 "exp": now + timedelta(minutes=30),
-                "email": E2E_EMAIL,
+                "email": email,
                 "jti": uuid.uuid4().hex,
             },
             _key,
             algorithm="ES256",
         )
         refresh = uuid.uuid4().hex
-        self.refresh_tokens.add(refresh)
+        self.refresh_tokens[refresh] = (user_id, email)
         return SupabaseSession(access_token=token, refresh_token=refresh, expires_in=1800)
 
     def sign_in(self, email: str, password: str) -> SupabaseSession:
-        if email != E2E_EMAIL or password != E2E_PASSWORD:
+        account = self.accounts.get(email.lower())
+        if account is None or account[1] != password:
             raise UnauthorizedError("Incorrect email or password.")
-        return self._issue()
+        return self._issue(account[0], email.lower())
+
+    def sign_up(self, email: str, password: str, full_name: str) -> SignUp:
+        email = email.lower()
+        if email in self.accounts:
+            return SignUp(user_id=None, session=None, existing=True)
+        user_id = uuid.uuid4()
+        self.accounts[email] = (user_id, password)
+        return SignUp(user_id=str(user_id), session=self._issue(user_id, email), existing=False)
+
+    def recover(self, email: str) -> None:
+        return None
 
     def refresh(self, refresh_token: str) -> SupabaseSession:
-        if refresh_token not in self.refresh_tokens:
+        owner = self.refresh_tokens.pop(refresh_token, None)  # single use, as with Supabase
+        if owner is None:
             raise UnauthorizedError("The session has expired. Sign in again.")
-        self.refresh_tokens.discard(refresh_token)  # single use, as with Supabase
-        return self._issue()
+        return self._issue(*owner)
 
     def sign_out(self, access_token: str) -> None:
         self.refresh_tokens.clear()

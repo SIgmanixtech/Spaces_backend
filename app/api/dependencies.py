@@ -63,6 +63,8 @@ def require_roles(*roles: UserRole) -> Callable[[AppUser], AppUser]:
 
 
 CurrentAdmin = Annotated[AppUser, Depends(require_roles(UserRole.ADMIN))]
+# The client app's customers. Admin and customer permissions never overlap.
+CurrentCustomer = Annotated[AppUser, Depends(require_roles(UserRole.CUSTOMER))]
 
 
 def list_query(

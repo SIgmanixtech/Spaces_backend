@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from typing import ClassVar, Literal, Self
+from typing import Any, ClassVar, Literal, Self
 
 from pydantic import AwareDatetime, EmailStr, Field, model_validator
 
@@ -71,6 +71,19 @@ class BookingRead(ReadSchema):
     notes: str | None
     cancelled_at: datetime | None
     cancellation_reason: str | None
+    channel: str = Field(
+        default="ADMIN", description="ADMIN for the admin portal, CUSTOMER for the customer app."
+    )
+    billing_period: str | None = Field(
+        default=None, description="The period the customer was quoted for; null for admin bookings."
+    )
+    quoted_total: float | None = Field(
+        default=None, description="Estimate shown to the customer when booking, not a payment."
+    )
+    quoted_currency: str | None = None
+    quote: dict[str, Any] | None = Field(
+        default=None, description="The full quote the customer saw (rate, periods, rule)."
+    )
     created_at: datetime
     updated_at: datetime
 

@@ -10,6 +10,7 @@ from app.schemas.common import InputSchema, ReadSchema, UpdateSchema
 
 class PropertyCreate(InputSchema):
     name: str = Field(min_length=1, max_length=200)
+    code: str | None = Field(default=None, min_length=1, max_length=50)
     property_type: str = Field(min_length=1, max_length=50)
     category: str = Field(min_length=1, max_length=50)
     description: str | None = None
@@ -25,14 +26,30 @@ class PropertyCreate(InputSchema):
     area_sqft: float | None = Field(default=None, ge=0)
     availability_notes: str | None = None
     status: PropertyStatus = PropertyStatus.ACTIVE
+    is_published: bool = Field(
+        default=True,
+        description="Listed for customers in the client app. New properties are listed at "
+        "once; set false to keep one hidden.",
+    )
 
 
 class PropertyUpdate(UpdateSchema):
     required_fields: ClassVar[frozenset[str]] = frozenset(
-        {"name", "property_type", "category", "address", "city", "state", "postal_code", "status"}
+        {
+            "name",
+            "property_type",
+            "category",
+            "address",
+            "city",
+            "state",
+            "postal_code",
+            "status",
+            "is_published",
+        }
     )
 
     name: str | None = Field(default=None, min_length=1, max_length=200)
+    code: str | None = Field(default=None, min_length=1, max_length=50)
     property_type: str | None = Field(default=None, min_length=1, max_length=50)
     category: str | None = Field(default=None, min_length=1, max_length=50)
     description: str | None = None
@@ -48,11 +65,13 @@ class PropertyUpdate(UpdateSchema):
     area_sqft: float | None = Field(default=None, ge=0)
     availability_notes: str | None = None
     status: PropertyStatus | None = None
+    is_published: bool | None = None
 
 
 class PropertyRead(ReadSchema):
     id: uuid.UUID
     name: str
+    code: str | None
     property_type: str
     category: str
     description: str | None
@@ -68,6 +87,7 @@ class PropertyRead(ReadSchema):
     area_sqft: float | None
     availability_notes: str | None
     status: PropertyStatus = Field(description="Operational status, set by an admin.")
+    is_published: bool = Field(description="Listed in the client app.")
     occupancy_status: OccupancyStatus = Field(
         description="Derived from current tenant occupancies and open bookings. Read-only."
     )

@@ -28,7 +28,7 @@ from app.services.occupancy import (
 class PropertyService(CrudService[Property]):
     model = Property
     label = "Property"
-    search_fields = ("name", "address", "city", "state", "postal_code")
+    search_fields = ("name", "code", "address", "city", "state", "postal_code")
     sort_fields = ("name", "city", "state", "capacity", "status", "created_at", "updated_at")
 
     def property_id_of(self, record: Property) -> uuid.UUID | None:

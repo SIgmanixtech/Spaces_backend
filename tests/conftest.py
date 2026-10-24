@@ -147,7 +147,33 @@ def migrated_database() -> None:
 
     config = Config(str(BACKEND_ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(BACKEND_ROOT / "migrations"))
+    _rebuild_if_worn_out()
     command.upgrade(config, "head")
+
+
+# PostgreSQL never reuses a dropped column's slot, and a table has at most 1600.
+# The migration tests add and drop columns on every downgrade/upgrade cycle, so a
+# long-lived test database eventually runs out. Rebuilding its schema resets that.
+WORN_OUT_ATTNUM = 1200
+
+
+def _rebuild_if_worn_out() -> None:
+    from app.db.session import dispose_engine, get_engine
+
+    with get_engine().begin() as connection:
+        worst = connection.execute(
+            text(
+                "SELECT coalesce(max(a.attnum), 0) FROM pg_attribute a"
+                " JOIN pg_class t ON t.oid = a.attrelid"
+                " JOIN pg_namespace n ON n.oid = t.relnamespace"
+                " WHERE n.nspname = 'public' AND t.relkind = 'r'"
+            )
+        ).scalar_one()
+        if worst > WORN_OUT_ATTNUM:
+            # Only ever the disposable database: its name was checked to contain "test".
+            connection.execute(text("DROP SCHEMA public CASCADE"))
+            connection.execute(text("CREATE SCHEMA public"))
+    dispose_engine()
 
 
 @pytest.fixture

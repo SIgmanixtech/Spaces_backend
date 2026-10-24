@@ -6,7 +6,7 @@ from fastapi import APIRouter, Query
 from app.api.dependencies import CurrentAdmin, DbSession, ListParams
 from app.api.responses import CONFLICT, NOT_FOUND, PROTECTED
 from app.models.enums import OccupancyStatus, TenantStatus
-from app.schemas.common import Page
+from app.schemas.common import Page, RemovalRead
 from app.schemas.tenant import (
     OccupancyCreate,
     OccupancyRead,
@@ -74,13 +74,15 @@ def update_tenant(
 
 @router.delete(
     "/{tenant_id}",
-    status_code=204,
+    response_model=RemovalRead,
     responses={**NOT_FOUND, **CONFLICT},
-    summary="Archive a tenant",
+    summary="Delete a tenant (archived if it has history)",
 )
-def archive_tenant(admin: CurrentAdmin, session: DbSession, tenant_id: uuid.UUID) -> None:
-    """Archive rather than delete. Refused while the tenant has a current occupancy."""
-    TenantService(session, admin).delete(tenant_id)
+def archive_tenant(admin: CurrentAdmin, session: DbSession, tenant_id: uuid.UUID) -> RemovalRead:
+    """Deleted for good when nothing refers to it; archived (hidden, kept for history)
+    when it has bookings, leases, prices, files or other records. Refused while it is in
+    current use."""
+    return RemovalRead.of("Tenant", TenantService(session, admin).delete(tenant_id))
 
 
 @router.get(

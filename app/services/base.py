@@ -1,7 +1,8 @@
 """Shared service behaviour: transactions, conflict translation, activity log, CRUD."""
 
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any, ClassVar, Generic, TypeVar
 
@@ -18,6 +19,7 @@ from app.repositories.base import ModelT, Repository, order_by_clause, text_sear
 from app.schemas.common import ListQuery
 
 _CONSTRAINT_MESSAGES = {
+    "uq_properties_code": "Another property already uses that code.",
     "uq_buildings_property_name": "This property already has a building with that name.",
     "uq_floors_building_level": "This building already has a floor at that level.",
     "uq_layouts_property_name": "This property already has a layout with that name.",
@@ -42,6 +44,10 @@ _CONSTRAINT_MESSAGES = {
     ),
     "ck_allocation_claim_chain": (
         "The space hierarchy changed while this request was running. Nothing was saved; try again."
+    ),
+    "ex_pricing_rules_active_overlap": (
+        "An active price for the same space (or default), basis and billing period already "
+        "covers part of those dates. Retire it, or end it before this one starts."
     ),
     "ck_spaces_move_blocked": (
         "The space, or a space inside it, has active or future bookings or contracts, so it "
@@ -71,8 +77,26 @@ def flush(session: Session) -> None:
         raise ConflictError(_conflict_message(exc)) from None
 
 
+# Set by ``one_transaction``: services then flush where they would commit.
+_DEFER_COMMIT = "defer_commit"
+
+
+@contextmanager
+def one_transaction(session: Session) -> Iterator[None]:
+    """Run several service calls as one transaction: each one's commit becomes a flush,
+    and the caller commits (or rolls back) everything once at the end."""
+    session.info[_DEFER_COMMIT] = True
+    try:
+        yield
+    finally:
+        session.info.pop(_DEFER_COMMIT, None)
+
+
 def commit(session: Session) -> None:
     """Commit, turning constraint violations into 409 responses without SQL details."""
+    if session.info.get(_DEFER_COMMIT):
+        flush(session)
+        return
     try:
         session.commit()
     except IntegrityError as exc:
@@ -149,6 +173,10 @@ class CrudService(Generic[ModelT]):
     def before_delete(self, record: ModelT) -> None:
         """Raise ConflictError if the record must not be deleted or archived."""
 
+    def keep_for_history(self, record: ModelT) -> bool:
+        """True if an archivable record must be archived even when nothing references it."""
+        return False
+
     def describe(self, record: ModelT) -> str:
         return str(getattr(record, "name", record.id))  # type: ignore[attr-defined]
 
@@ -210,16 +238,35 @@ class CrudService(Generic[ModelT]):
         commit(self.session)
         return record
 
-    def delete(self, record_id: uuid.UUID) -> None:
+    def delete(self, record_id: uuid.UUID) -> str:
+        """Delete the record. An archivable record that anything still refers to (bookings,
+        leases, prices, files, spaces inside it...) is archived instead, so history stays
+        intact. Returns "DELETED" or "ARCHIVED"."""
         record = self.get(record_id)
         self.before_delete(record)
-        if hasattr(record, "archived_at"):
-            record.archived_at = datetime.now(UTC)
-            self._log("archived", record)
-        else:
+        if not hasattr(record, "archived_at"):
             self._log("deleted", record)
             self.repository.delete(record)
+            commit(self.session)
+            return "DELETED"
+        if not self.keep_for_history(record):
+            try:
+                # The database knows every reference; a refused delete means it is in use.
+                with self.session.begin_nested():
+                    # Logged first: the entry may point at the record until it is gone.
+                    self._log("deleted", record)
+                    self.session.flush()
+                    self.repository.delete(record)
+                    self.session.flush()
+            except IntegrityError:
+                record = self.get(record_id)
+            else:
+                commit(self.session)
+                return "DELETED"
+        record.archived_at = datetime.now(UTC)
+        self._log("archived", record)
         commit(self.session)
+        return "ARCHIVED"
 
     def _log(self, action: str, record: ModelT) -> None:
         log_activity(

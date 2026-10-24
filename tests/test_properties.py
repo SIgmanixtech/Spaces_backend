@@ -66,10 +66,23 @@ def test_inactive_property_reports_unavailable(api: TestClient) -> None:
     assert response.json()["occupancy_status"] == "UNAVAILABLE"
 
 
-def test_archived_property_disappears_but_is_kept(api: TestClient) -> None:
+def test_an_unused_property_is_deleted_for_good(api: TestClient) -> None:
     created = create_property(api)
 
-    assert api.delete(f"{PROPERTIES}/{created['id']}").status_code == 204
+    removed = api.delete(f"{PROPERTIES}/{created['id']}")
+    assert removed.status_code == 200
+    assert removed.json() == {"outcome": "DELETED", "message": "Property deleted."}
+    assert api.get(f"{PROPERTIES}/{created['id']}").status_code == 404
+    assert api.get(PROPERTIES, params={"include_archived": True}).json()["total"] == 0
+
+
+def test_archived_property_disappears_but_is_kept(api: TestClient) -> None:
+    created = create_property(api)
+    # Something refers to it, so deleting archives it instead.
+    api.post("/api/v1/buildings", json={"property_id": created["id"], "name": "Tower A"})
+
+    removed = api.delete(f"{PROPERTIES}/{created['id']}")
+    assert removed.json()["outcome"] == "ARCHIVED"
 
     assert api.get(f"{PROPERTIES}/{created['id']}").status_code == 404
     assert api.get(PROPERTIES).json()["total"] == 0

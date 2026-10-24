@@ -1,6 +1,7 @@
 """Images and documents of a property and its buildings, layouts, spaces and assets."""
 
 import uuid
+from collections.abc import Callable
 from functools import lru_cache
 from typing import Annotated
 
@@ -52,6 +53,14 @@ def get_storage(request: Request, settings: AppSettings) -> ObjectStorage:
 
 
 Storage = Annotated[ObjectStorage, Depends(get_storage)]
+
+
+def get_storage_factory(request: Request, settings: AppSettings) -> Callable[[], ObjectStorage]:
+    """Storage looked up only when needed, for endpoints where files are optional."""
+    return lambda: storage_from_settings(settings, str(request.base_url))
+
+
+StorageFactory = Annotated[Callable[[], ObjectStorage], Depends(get_storage_factory)]
 
 
 @router.get(

@@ -9,12 +9,15 @@ from app.api.v1.endpoints import (
     bookings,
     buildings,
     contracts,
+    customer,
     files,
     floors,
     health,
     layouts,
+    pricing,
     properties,
     property_dashboard,
+    public,
     spaces,
     tenants,
 )
@@ -35,3 +38,8 @@ api_router.include_router(tenants.occupancy_router)
 api_router.include_router(assets.router)
 api_router.include_router(files.router)
 api_router.include_router(contracts.router)
+api_router.include_router(pricing.router)
+api_router.include_router(pricing.property_router)
+api_router.include_router(pricing.profile_router)
+api_router.include_router(public.router)
+api_router.include_router(customer.router)

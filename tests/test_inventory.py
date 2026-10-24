@@ -402,17 +402,19 @@ def test_archive_respects_the_hierarchy(
     assert blocked.status_code == 409
     assert "contains other spaces" in blocked.json()["detail"]
 
+    # Nothing refers to them, so they are deleted for good, not archived.
     for target in (desk, portion):
-        assert api.delete(f"{SPACES}/{target['id']}").status_code == 204
+        removed = api.delete(f"{SPACES}/{target['id']}")
+        assert removed.status_code == 200 and removed.json()["outcome"] == "DELETED"
     assert listed(api, floor_id=floor["id"]) == []
-    assert listed(api, floor_id=floor["id"], include_archived="true") == ["Desk", "East wing"]
+    assert listed(api, floor_id=floor["id"], include_archived="true") == []
     # An archived space is no longer a valid parent.
     assert space(api, prop, "DESK", "Late", 404, parent_space_id=portion["id"])["detail"] == (
         "Parent space not found."
     )
 
-    # The whole-floor space can be archived once empty, and then replaced.
-    assert api.delete(f"{SPACES}/{root['id']}").status_code == 204
+    # The whole-floor space can be removed once empty, and then replaced.
+    assert api.delete(f"{SPACES}/{root['id']}").status_code == 200
     replacement = space(api, prop, "FLOOR", "Whole floor (new)", floor_id=floor["id"])
     assert replacement["id"] != root["id"]
 

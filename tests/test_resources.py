@@ -196,7 +196,7 @@ def test_space_rules_and_derived_status(api: TestClient) -> None:
     ).json()
     assert updated["status"] == "UNAVAILABLE"
 
-    assert api.delete(f"{V1}/spaces/{space['id']}").status_code == 204
+    assert api.delete(f"{V1}/spaces/{space['id']}").json()["outcome"] == "DELETED"
     assert api.get(f"{V1}/spaces", params={"property_id": prop["id"]}).json()["total"] == 0
 
 
@@ -263,7 +263,7 @@ def test_tenant_crud_and_search(api: TestClient) -> None:
     found = api.get(f"{V1}/tenants", params={"search": "acme.example"}).json()
     assert [item["name"] for item in found["items"]] == ["Acme Ltd"]
 
-    assert api.delete(f"{V1}/tenants/{tenant['id']}").status_code == 204
+    assert api.delete(f"{V1}/tenants/{tenant['id']}").json()["outcome"] == "DELETED"
     assert api.get(f"{V1}/tenants").json()["total"] == 1
 
 

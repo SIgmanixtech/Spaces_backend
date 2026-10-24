@@ -47,13 +47,20 @@ def test_every_business_route_requires_authentication(client: TestClient) -> Non
         "/api/v1/health/ready",
         "/api/v1/auth/login",
         "/api/v1/auth/refresh",
+        # The client app: signing up and resetting a password happen before sign-in.
+        "/api/v1/customer/register",
+        "/api/v1/customer/password-recovery",
+        "/api/v1/customer/resend-confirmation",
     }
+    # The published-property catalogue is public by design and lives under its own prefix.
+    catalogue = "/api/v1/public/"
     schema = client.get("/api/v1/openapi.json").json()
+    assert any(path.startswith(catalogue) for path in schema["paths"])
 
     unprotected = [
         f"{method.upper()} {path}"
         for path, operations in schema["paths"].items()
-        if path not in public
+        if path not in public and not path.startswith(catalogue)
         for method, operation in operations.items()
         if not operation.get("security")
     ]

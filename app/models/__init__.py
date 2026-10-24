@@ -8,6 +8,7 @@ from app.models.booking import Booking
 from app.models.building import Building, Floor
 from app.models.file import StoredFile
 from app.models.layout import Layout
+from app.models.pricing import BillingProfile, PricingRule
 from app.models.property import Property
 from app.models.space import Space
 from app.models.tenant import Tenant, TenantOccupancy
@@ -20,11 +21,13 @@ __all__ = [
     "Amenity",
     "AppUser",
     "Asset",
+    "BillingProfile",
     "Booking",
     "Building",
     "Floor",
     "Layout",
     "Property",
+    "PricingRule",
     "PropertyAmenity",
     "Space",
     "StoredFile",

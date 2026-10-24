@@ -1,7 +1,7 @@
 import uuid
 from decimal import Decimal
 
-from sqlalchemy import CheckConstraint, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Integer, Numeric, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -21,6 +21,8 @@ class Property(UUIDPrimaryKeyMixin, TimestampMixin, ArchivableMixin, Base):
     )
 
     name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    # The short code the property team uses ("SH", "N1"). Optional; unique when given.
+    code: Mapped[str | None] = mapped_column(String(50), unique=True)
     property_type: Mapped[str] = mapped_column(String(50), nullable=False)
     category: Mapped[str] = mapped_column(String(50), nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
@@ -37,6 +39,10 @@ class Property(UUIDPrimaryKeyMixin, TimestampMixin, ArchivableMixin, Base):
     availability_notes: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, server_default=PropertyStatus.ACTIVE.value, index=True
+    )
+    # Shown to customers in the client app. New and existing properties start unpublished.
+    is_published: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
     )
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("app_users.id", ondelete="SET NULL")

@@ -12,7 +12,7 @@ import re
 import struct
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -212,7 +212,10 @@ class FileService:
         category: str | None = None,
         sort_order: int | None = None,
         is_primary: bool | None = None,
+        on_stored: Callable[[str], None] | None = None,
     ) -> FileRead:
+        """``on_stored`` is told the object path as soon as the bytes are stored, so a
+        caller running a larger transaction can delete them if that transaction fails."""
         prop = require(self.session, Property, property_id, "Property")
         owner = {
             "building_id": building_id,
@@ -256,6 +259,8 @@ class FileService:
             self.storage.put(object_path, data, content.content_type)
         except StorageError as exc:
             raise ServiceUnavailableError(f"The file was not stored: {exc}") from None
+        if on_stored is not None:
+            on_stored(object_path)
 
         record = StoredFile(
             property_id=prop.id,

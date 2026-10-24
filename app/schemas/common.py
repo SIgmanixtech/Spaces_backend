@@ -9,6 +9,19 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 T = TypeVar("T")
 
 
+class RemovalRead(BaseModel):
+    outcome: Literal["DELETED", "ARCHIVED"] = Field(
+        description="DELETED when nothing referred to it; ARCHIVED when it has history."
+    )
+    message: str
+
+    @classmethod
+    def of(cls, noun: str, outcome: str) -> "RemovalRead":
+        if outcome == "DELETED":
+            return cls(outcome="DELETED", message=f"{noun} deleted.")
+        return cls(outcome="ARCHIVED", message=f"{noun} archived: it has history, which is kept.")
+
+
 class ReadSchema(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

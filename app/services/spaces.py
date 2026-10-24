@@ -50,6 +50,22 @@ ALLOWED_PARENTS: dict[SpaceType, frozenset[SpaceType]] = {
     SpaceType.TRAINING_ROOM: _FLOOR_OR_PORTION,
     SpaceType.NON_RENTABLE: _FLOOR_OR_PORTION,
     SpaceType.DESK: _FLOOR_OR_PORTION | {SpaceType.PRIVATE_OFFICE, SpaceType.COWORKING},
+    SpaceType.OTHER: _FLOOR_OR_PORTION,
+    # A dedicated workstation may sit in an office or cabin it belongs to.
+    SpaceType.DEDICATED_WORKSTATION: _FLOOR_OR_PORTION
+    | {SpaceType.COWORKING, SpaceType.PRIVATE_OFFICE, SpaceType.CABIN},
+    SpaceType.FLEXIBLE_WORKSTATION: _FLOOR_OR_PORTION | {SpaceType.COWORKING},
+    # A seat is the smallest unit: in open seating, at a workstation or bench, or in a
+    # training or conference room let seat by seat. Booking it holds only that seat.
+    SpaceType.SEAT: _FLOOR_OR_PORTION
+    | {
+        SpaceType.COWORKING,
+        SpaceType.DESK,
+        SpaceType.DEDICATED_WORKSTATION,
+        SpaceType.FLEXIBLE_WORKSTATION,
+        SpaceType.TRAINING_ROOM,
+        SpaceType.CONFERENCE_ROOM,
+    },
 }
 
 
@@ -238,6 +254,10 @@ class SpaceService(CrudService[Space]):
         self._log("moved", space)
         commit(self.session)
         return space
+
+    def keep_for_history(self, record: Space) -> bool:
+        # Spaces inside it, even archived ones, still point at it (checked only at commit).
+        return bool(self.session.scalar(select(exists().where(Space.parent_space_id == record.id))))
 
     def before_delete(self, record: Space) -> None:
         now = datetime.now(UTC)

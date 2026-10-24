@@ -9,6 +9,8 @@ from enum import StrEnum
 
 class UserRole(StrEnum):
     ADMIN = "ADMIN"
+    # A customer of the client app: sees published properties and only their own records.
+    CUSTOMER = "CUSTOMER"
 
 
 class OccupancyStatus(StrEnum):
@@ -57,6 +59,14 @@ class SpaceType(StrEnum):
     TRAINING_ROOM = "TRAINING_ROOM"
     # Corridors, washrooms, service areas: part of the inventory, never rented.
     NON_RENTABLE = "NON_RENTABLE"
+    # A workstation assigned to one occupant for the whole term.
+    DEDICATED_WORKSTATION = "DEDICATED_WORKSTATION"
+    # A hot desk: any member may use it, booked by the hour or day.
+    FLEXIBLE_WORKSTATION = "FLEXIBLE_WORKSTATION"
+    # One seat. Booking it holds that seat only, never its neighbours.
+    SEAT = "SEAT"
+    # Any other rentable space (storage, kiosk, studio...).
+    OTHER = "OTHER"
 
 
 class SpaceOperationalStatus(StrEnum):
@@ -134,3 +144,99 @@ HOLDING_CONTRACT_STATUSES = (ContractStatus.ACTIVE, ContractStatus.TERMINATED)
 class AllocationSource(StrEnum):
     BOOKING = "BOOKING"
     CONTRACT = "CONTRACT"
+
+
+class PricingTarget(StrEnum):
+    """What a pricing rule prices: the property as a default, or one space."""
+
+    PROPERTY = "PROPERTY"
+    BUILDING = "BUILDING"
+    SPACE = "SPACE"
+
+
+class RateBasis(StrEnum):
+    """What the amount is multiplied by. Separate from how often it is charged."""
+
+    PER_SQFT = "PER_SQFT"
+    PER_PERSON = "PER_PERSON"
+    PER_FLOOR = "PER_FLOOR"
+    PER_PORTION = "PER_PORTION"
+    PER_CABIN = "PER_CABIN"
+    PER_OFFICE = "PER_OFFICE"
+    PER_WORKSTATION = "PER_WORKSTATION"
+    PER_SEAT = "PER_SEAT"
+    PER_ROOM = "PER_ROOM"
+    PER_HALL = "PER_HALL"
+    PER_UNIT = "PER_UNIT"
+
+
+class BillingPeriod(StrEnum):
+    """How long one charge of the amount covers."""
+
+    HOURLY = "HOURLY"
+    HALF_DAY = "HALF_DAY"
+    FULL_DAY = "FULL_DAY"
+    DAILY = "DAILY"
+    WEEKLY = "WEEKLY"
+    MONTHLY = "MONTHLY"
+    CUSTOM = "CUSTOM"
+
+
+class PricingStatus(StrEnum):
+    DRAFT = "DRAFT"
+    ACTIVE = "ACTIVE"
+    RETIRED = "RETIRED"
+
+
+class MaintenanceBasis(StrEnum):
+    PER_SQFT = "PER_SQFT"
+    FIXED = "FIXED"
+
+
+class TaxTreatment(StrEnum):
+    EXEMPT = "EXEMPT"
+    INCLUDED = "INCLUDED"
+    ADDITIONAL = "ADDITIONAL"
+
+
+class DepositRule(StrEnum):
+    NONE = "NONE"
+    FIXED = "FIXED"
+    MONTHS_OF_RENT = "MONTHS_OF_RENT"
+
+
+class PaymentFrequency(StrEnum):
+    MONTHLY = "MONTHLY"
+    QUARTERLY = "QUARTERLY"
+    HALF_YEARLY = "HALF_YEARLY"
+    ANNUALLY = "ANNUALLY"
+    PER_BOOKING = "PER_BOOKING"
+    CUSTOM = "CUSTOM"
+
+
+class BookingChannel(StrEnum):
+    """Where a booking was made: by an administrator, or by a customer in the client app."""
+
+    ADMIN = "ADMIN"
+    CUSTOMER = "CUSTOMER"
+
+
+class RateSource(StrEnum):
+    """Where a price came from.
+
+    CONFIGURED  entered by an administrator
+    DERIVED     calculated from another rule with a billing profile, then approved
+    OVERRIDE    entered by an administrator to replace a derived rate for its period
+    """
+
+    CONFIGURED = "CONFIGURED"
+    DERIVED = "DERIVED"
+    OVERRIDE = "OVERRIDE"
+
+
+class RoundingPolicy(StrEnum):
+    """How derived amounts are rounded (half up)."""
+
+    PAISA = "PAISA"
+    RUPEE = "RUPEE"
+    TEN_RUPEES = "TEN_RUPEES"

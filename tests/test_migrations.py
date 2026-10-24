@@ -562,6 +562,7 @@ def test_0004_refuses_to_upgrade_over_existing_hierarchy_conflicts(migrations: C
 def test_0004_downgrade_refuses_to_discard_contract_data(
     migrations: Config, change: str, refused: bool
 ) -> None:
+    command.downgrade(migrations, "0004")
     with get_engine().begin() as connection:
         ids = floor_with_portion(connection)
         connection.execute(
@@ -596,3 +597,215 @@ def test_revision_0004_renders_as_sql_without_a_database(
     # Nothing is deleted; only the old one-occupant exclusion is replaced.
     assert "DELETE FROM" not in upgrade and "TRUNCATE" not in upgrade
     assert downgrade.index("Cannot downgrade past 0004") < downgrade.index("DROP TABLE")
+
+
+def test_0005_keeps_existing_spaces_and_their_list_prices_and_creates_no_rule(
+    migrations: Config,
+) -> None:
+    command.downgrade(migrations, "0004")
+    with get_engine().begin() as connection:
+        ids = floor_with_portion(connection)
+        connection.execute(
+            text("UPDATE spaces SET price_amount = 999, price_unit = 'MONTH' WHERE id = :d"),
+            {"d": ids["desk"]},
+        )
+        before = snapshot(connection)
+    command.upgrade(migrations, "0005")
+    with get_engine().connect() as connection:
+        assert snapshot(connection) == before
+        assert connection.execute(text("SELECT count(*) FROM pricing_rules")).scalar_one() == 0
+
+
+@pytest.mark.parametrize("what", ["rule", "seat"])
+def test_0005_downgrade_refuses_to_discard_prices_or_new_space_types(
+    migrations: Config, what: str
+) -> None:
+    command.downgrade(migrations, "0005")
+    with get_engine().begin() as connection:
+        ids = floor_with_portion(connection)
+        if what == "rule":
+            connection.execute(
+                text(
+                    "INSERT INTO pricing_rules (property_id, target_type, rate_basis,"
+                    " billing_period, amount, effective_from)"
+                    " VALUES (:p, 'PROPERTY', 'PER_SQFT', 'MONTHLY', 70, '2026-01-01')"
+                ),
+                {"p": ids["property"]},
+            )
+        else:
+            connection.execute(
+                text(
+                    "INSERT INTO spaces (property_id, building_id, floor_id, parent_space_id,"
+                    " depth, parent_depth, name, space_type)"
+                    " VALUES (:p, :b, :f, :a, 2, 1, 'Seat 1', 'SEAT')"
+                ),
+                {"p": ids["property"], "b": ids["building"], "f": ids["floor"], "a": ids["5A"]},
+            )
+    with pytest.raises(DBAPIError, match="Cannot downgrade past 0005"):
+        command.downgrade(migrations, "0004")
+    assert current_revision() == "0005"
+
+
+def test_0005_refuses_overlapping_active_rules_in_the_database(migrations: Config) -> None:
+    insert = text(
+        "INSERT INTO pricing_rules (property_id, target_type, rate_basis, billing_period,"
+        " amount, effective_from, effective_to, status)"
+        " VALUES (:p, 'PROPERTY', 'PER_SQFT', 'MONTHLY', :a, :f, :t, :s)"
+    )
+    with get_engine().begin() as connection:
+        ids = floor_with_portion(connection)
+        row = {"p": ids["property"], "a": 70, "f": "2026-01-01", "t": "2026-12-31", "s": "ACTIVE"}
+        connection.execute(insert, row)
+        connection.execute(insert, {**row, "s": "DRAFT"})  # drafts never clash
+        connection.execute(insert, {**row, "f": "2027-01-01", "t": None})  # later dates
+    with (
+        pytest.raises(DBAPIError, match="ex_pricing_rules_active_overlap"),
+        get_engine().begin() as connection,
+    ):
+        connection.execute(insert, {**row, "f": "2026-06-01", "t": None})
+
+
+def test_revision_0005_renders_as_sql_without_a_database(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command.upgrade(alembic_config(), "0004:0005", sql=True)
+    upgrade = capsys.readouterr().out
+    command.downgrade(alembic_config(), "0005:0004", sql=True)
+    downgrade = capsys.readouterr().out
+
+    assert "CREATE TABLE pricing_rules" in upgrade
+    assert "ex_pricing_rules_active_overlap" in upgrade and "'SEAT'" in upgrade
+    assert "INSERT INTO pricing_rules" not in upgrade  # no example prices
+    assert "DELETE FROM" not in upgrade and "TRUNCATE" not in upgrade
+    assert downgrade.index("Cannot downgrade past 0005") < downgrade.index("DROP TABLE")
+
+
+def test_0006_keeps_every_row_and_publishes_nothing(migrations: Config) -> None:
+    command.downgrade(migrations, "0005")
+    with get_engine().begin() as connection:
+        ids = floor_with_portion(connection)
+        connection.execute(text("INSERT INTO tenants (name) VALUES ('Acme')"))
+        connection.execute(
+            text(
+                "INSERT INTO bookings (property_id, space_id, customer_name, start_at, end_at)"
+                " VALUES (:p, :d, 'Walk-in', '2031-01-01 09:00+00', '2031-01-01 10:00+00')"
+            ),
+            {"p": ids["property"], "d": ids["desk"]},
+        )
+        before = snapshot(connection)
+    command.upgrade(migrations, "0006")
+    with get_engine().connect() as connection:
+        after = snapshot(connection)
+        assert (
+            connection.execute(
+                text("SELECT count(*) FROM properties WHERE is_published")
+            ).scalar_one()
+            == 0
+        )
+        assert connection.execute(text("SELECT channel FROM bookings")).scalar_one() == "ADMIN"
+    for table, rows in before.items():
+        assert [
+            {k: v for k, v in row.items() if k in rows_before}
+            for row, rows_before in zip(after[table], rows, strict=True)
+        ] == rows
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "UPDATE properties SET is_published = true",
+        "INSERT INTO app_users (id, email, role) VALUES (gen_random_uuid(), 'c@x.com', 'CUSTOMER')",
+    ],
+)
+def test_0006_downgrade_refuses_to_discard_customer_data(migrations: Config, change: str) -> None:
+    command.downgrade(migrations, "0006")
+    with get_engine().begin() as connection:
+        floor_with_portion(connection)
+        connection.execute(text(change))
+    with pytest.raises(DBAPIError, match="Cannot downgrade past 0006"):
+        command.downgrade(migrations, "0005")
+    assert current_revision() == "0006"
+
+
+def test_revision_0006_renders_as_sql_without_a_database(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command.upgrade(alembic_config(), "0005:0006", sql=True)
+    upgrade = capsys.readouterr().out
+    command.downgrade(alembic_config(), "0006:0005", sql=True)
+    downgrade = capsys.readouterr().out
+    assert "ADD COLUMN is_published BOOLEAN DEFAULT false NOT NULL" in upgrade
+    assert "uq_tenants_user_id" in upgrade
+    assert "DELETE FROM" not in upgrade and "UPDATE properties" not in upgrade
+    assert downgrade.index("Cannot downgrade past 0006") < downgrade.index("DROP COLUMN")
+
+
+def test_0007_adds_an_empty_unique_property_code_and_guards_its_downgrade(
+    migrations: Config,
+) -> None:
+    command.downgrade(migrations, "0006")
+    with get_engine().begin() as connection:
+        ids = floor_with_portion(connection)
+    command.upgrade(migrations, "0007")
+    with get_engine().begin() as connection:
+        assert (
+            connection.execute(
+                text("SELECT code FROM properties WHERE id = :p"), {"p": ids["property"]}
+            ).scalar_one()
+            is None
+        )
+        connection.execute(text("UPDATE properties SET code = 'SH'"))
+    with pytest.raises(DBAPIError, match="Cannot downgrade past 0007"):
+        command.downgrade(migrations, "0006")
+    assert current_revision() == "0007"
+
+
+def test_revision_0007_renders_as_sql_without_a_database(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command.upgrade(alembic_config(), "0006:0007", sql=True)
+    upgrade = capsys.readouterr().out
+    assert "ALTER TABLE properties ADD COLUMN code VARCHAR(50)" in upgrade
+    assert "uq_properties_code" in upgrade
+    assert "UPDATE properties" not in upgrade and "DELETE FROM" not in upgrade
+
+
+def test_0008_keeps_prices_configured_and_guards_its_downgrade(migrations: Config) -> None:
+    command.downgrade(migrations, "0007")
+    with get_engine().begin() as connection:
+        ids = floor_with_portion(connection)
+        connection.execute(
+            text(
+                "INSERT INTO pricing_rules (property_id, target_type, rate_basis, billing_period,"
+                " amount, effective_from, status)"
+                " VALUES (:p, 'PROPERTY', 'PER_SQFT', 'MONTHLY', 70, '2026-01-01', 'ACTIVE')"
+            ),
+            {"p": ids["property"]},
+        )
+    command.upgrade(migrations, "0008")
+    with get_engine().begin() as connection:
+        assert connection.execute(text("SELECT source FROM pricing_rules")).scalar_one() == (
+            "CONFIGURED"
+        )
+        assert connection.execute(text("SELECT count(*) FROM billing_profiles")).scalar_one() == 0
+        connection.execute(
+            text(
+                "INSERT INTO billing_profiles (property_id, hours_per_day, days_per_week,"
+                " days_per_month, weekly_discount_pct, monthly_discount_pct, rounding)"
+                " VALUES (:p, 8, 6, 26, 0, 0, 'PAISA')"
+            ),
+            {"p": ids["property"]},
+        )
+    with pytest.raises(DBAPIError, match="Cannot downgrade past 0008"):
+        command.downgrade(migrations, "0007")
+    assert current_revision() == "0008"
+
+
+def test_revision_0008_renders_as_sql_without_a_database(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command.upgrade(alembic_config(), "0007:0008", sql=True)
+    upgrade = capsys.readouterr().out
+    assert "CREATE TABLE billing_profiles" in upgrade
+    assert "coalesce(building_id" in upgrade
+    assert "INSERT INTO billing_profiles" not in upgrade and "UPDATE pricing_rules" not in upgrade

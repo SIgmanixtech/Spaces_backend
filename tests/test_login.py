@@ -146,3 +146,81 @@ def test_sign_in_is_unavailable_without_a_publishable_key() -> None:
 
     with pytest.raises(ServiceUnavailableError):
         gateway.sign_in("admin@example.com", PASSWORD)
+
+
+def _gateway_answering(monkeypatch: pytest.MonkeyPatch, status: int, body: dict) -> list:
+    import httpx
+
+    calls: list = []
+
+    def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        calls.append((url, kwargs.get("json")))
+        return httpx.Response(status, json=body)
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    return calls
+
+
+def test_an_unconfirmed_email_is_told_so_not_wrong_password(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.errors import EmailNotConfirmedError
+
+    gateway = SupabaseAuthGateway("http://supabase.test/auth/v1", "publishable")
+    # What Supabase answers for the right password on an address never confirmed.
+    _gateway_answering(
+        monkeypatch,
+        400,
+        {"code": 400, "error_code": "email_not_confirmed", "msg": "Email not confirmed"},
+    )
+    with pytest.raises(EmailNotConfirmedError, match="not confirmed"):
+        gateway.sign_in("new@example.com", PASSWORD)
+    # Older Supabase versions give only the message.
+    _gateway_answering(
+        monkeypatch, 400, {"error": "invalid_grant", "error_description": "Email not confirmed"}
+    )
+    with pytest.raises(EmailNotConfirmedError):
+        gateway.sign_in("new@example.com", PASSWORD)
+    # A wrong password still gets the one message for every bad sign-in.
+    _gateway_answering(
+        monkeypatch,
+        400,
+        {"error_code": "invalid_credentials", "msg": "Invalid login credentials"},
+    )
+    with pytest.raises(UnauthorizedError, match="Incorrect email or password") as wrong:
+        gateway.sign_in("new@example.com", "wrong")
+    assert not isinstance(wrong.value, EmailNotConfirmedError)
+
+
+def test_unconfirmed_sign_in_answers_with_its_own_code(client: TestClient) -> None:
+    from app.core.errors import EmailNotConfirmedError
+
+    class Unconfirmed:
+        def sign_in(self, email: str, password: str) -> SupabaseSession:
+            raise EmailNotConfirmedError("Your email address is not confirmed yet.")
+
+    app.dependency_overrides[get_auth_gateway] = Unconfirmed
+    try:
+        response = client.post(LOGIN, json={"email": "new@example.com", "password": PASSWORD})
+    finally:
+        app.dependency_overrides.pop(get_auth_gateway, None)
+    assert response.status_code == 401
+    assert response.json()["code"] == "email_not_confirmed"
+
+
+def test_confirmation_email_can_be_sent_again(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gateway = SupabaseAuthGateway("http://supabase.test/auth/v1", "publishable")
+    calls = _gateway_answering(monkeypatch, 200, {})
+    app.dependency_overrides[get_auth_gateway] = lambda: gateway
+    try:
+        response = client.post(
+            "/api/v1/customer/resend-confirmation", json={"email": "new@example.com"}
+        )
+    finally:
+        app.dependency_overrides.pop(get_auth_gateway, None)
+    assert response.status_code == 202
+    assert calls == [
+        ("http://supabase.test/auth/v1/resend", {"type": "signup", "email": "new@example.com"})
+    ]

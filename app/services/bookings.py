@@ -43,6 +43,8 @@ from app.core.errors import BadRequestError, ConflictError, NotFoundError
 from app.models.booking import Booking
 from app.models.enums import (
     AllocationSource,
+    BillingPeriod,
+    BookingChannel,
     BookingStatus,
     PropertyStatus,
     SpaceOperationalStatus,
@@ -58,6 +60,7 @@ from app.services.allocations import AllocationConflict, AllocationEngine, booki
 from app.services.base import commit, flush, log_activity, require
 from app.services.hierarchy import Family, family
 from app.services.occupancy import OPEN_BOOKING_STATUSES, holds_inventory
+from app.services.pricing import PricingService, periods_in
 
 MAX_DURATION = timedelta(days=366)
 MIN_YEAR, MAX_YEAR = 2000, 2200
@@ -241,6 +244,10 @@ class BookingService:
             space = self._lock_space(booking.space_id)
             self._check_window(start_at, end_at)
             self._ensure_free(space, start_at, end_at, tenant_id, exclude_id=booking.id)
+            if booking.channel == BookingChannel.CUSTOMER and "quoted_total" not in values:
+                # An administrator moved a customer's booking: the customer must not keep
+                # seeing the price of the old time.
+                values = {**values, **self._requote(booking, start_at, end_at)}
 
         for field, value in values.items():
             setattr(booking, field, value)
@@ -250,6 +257,35 @@ class BookingService:
         self._log("rescheduled" if rescheduled else "updated", booking, booking.property_id)
         commit(self.session)
         return self.get(booking_id)
+
+    def _requote(self, booking: Booking, start_at: datetime, end_at: datetime) -> dict[str, Any]:
+        """The customer's estimate for the new time, on the period they booked. A time that
+        cannot be priced that way (not whole periods, or no rate) clears the estimate instead
+        of leaving the old one in place."""
+        cleared: dict[str, Any] = {
+            "pricing_rule_id": None,
+            "quoted_total": None,
+            "quoted_currency": None,
+            "quote": None,
+        }
+        if not booking.billing_period:
+            return cleared
+        try:
+            quantity = periods_in(booking.billing_period, start_at, end_at)
+            price, estimate = PricingService(self.session).estimate(
+                booking.space_id,
+                BillingPeriod(booking.billing_period),
+                on=start_at.astimezone(ZoneInfo(get_settings().business_timezone)).date(),
+                quantity=quantity,
+            )
+        except (BadRequestError, NotFoundError):
+            return cleared
+        return {
+            "pricing_rule_id": price.rule.id,
+            "quoted_total": estimate.recurring_total,
+            "quoted_currency": estimate.currency,
+            "quote": estimate.model_dump(mode="json"),
+        }
 
     def confirm(self, booking_id: uuid.UUID) -> BookingRead:
         booking = self._transition(booking_id, BookingStatus.CONFIRMED)

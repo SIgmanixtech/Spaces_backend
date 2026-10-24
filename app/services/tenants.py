@@ -50,6 +50,10 @@ class TenantService(CrudService[Tenant]):
         ):
             raise ConflictError("The tenant has a current occupancy. End it first.")
 
+    def keep_for_history(self, record: Tenant) -> bool:
+        # A customer's own record: their account still points at it.
+        return record.user_id is not None
+
     def search(
         self,
         query: ListQuery,

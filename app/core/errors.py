@@ -58,6 +58,12 @@ class UnauthorizedError(AppError):
     code = "unauthorized"
 
 
+class EmailNotConfirmedError(UnauthorizedError):
+    """Right password, but the address was never confirmed from the sign-up email."""
+
+    code = "email_not_confirmed"
+
+
 class ForbiddenError(AppError):
     status_code = 403
     code = "forbidden"

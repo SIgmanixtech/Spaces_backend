@@ -1,5 +1,7 @@
 import uuid
 from datetime import datetime
+from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import (
     CheckConstraint,
@@ -7,16 +9,17 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    Numeric,
     Sequence,
     String,
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import ExcludeConstraint
+from sqlalchemy.dialects.postgresql import JSONB, ExcludeConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
-from app.models.enums import BookingStatus
+from app.models.enums import BillingPeriod, BookingChannel, BookingStatus
 from app.models.mixins import TimestampMixin, UUIDPrimaryKeyMixin, enum_check
 
 booking_reference_seq = Sequence("booking_reference_seq", metadata=Base.metadata)
@@ -31,6 +34,8 @@ class Booking(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "bookings"
     __table_args__ = (
         enum_check("status", BookingStatus),
+        enum_check("channel", BookingChannel),
+        enum_check("billing_period", BillingPeriod),
         # The space must belong to the booking's property.
         ForeignKeyConstraint(
             ["space_id", "property_id"],
@@ -82,3 +87,15 @@ class Booking(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("app_users.id", ondelete="SET NULL")
     )
+    channel: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=BookingChannel.ADMIN.value
+    )
+    # The price the backend calculated when a customer submitted the booking: a record
+    # of the quote, not a payment. Null for bookings made by an administrator.
+    billing_period: Mapped[str | None] = mapped_column(String(16))
+    pricing_rule_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("pricing_rules.id", ondelete="SET NULL")
+    )
+    quoted_total: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    quoted_currency: Mapped[str | None] = mapped_column(String(3))
+    quote: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
