@@ -6,7 +6,10 @@ A contract is a ``tenant_occupancies`` row with a lifecycle:
        |                    |  \\--extend--> ACTIVE (new end date)
        +------cancel--------+--> CANCELLED
 
-PENDING and CANCELLED hold nothing. ACTIVE and TERMINATED hold their dates
+PENDING and CANCELLED hold nothing, except a PENDING contract a customer requested from
+the client app: it holds its space while it waits for the property team, so no one else
+can take it, and rejecting (cancelling) it frees the space at once. ACTIVE and TERMINATED
+hold their dates
 (TERMINATED up to the termination date). An ACTIVE contract whose last day has
 passed reads as EXPIRED and simply stops holding when its period ends; nothing
 has to run for that. Records are never deleted to release a space.
@@ -220,6 +223,24 @@ class ContractService:
         commit(self.session)
         return self.get(contract.id)
 
+    def request(self, values: dict[str, Any]) -> TenantOccupancy:
+        """A customer's contract request: PENDING, but holding its space at once. The
+        property team approves it (activate) or rejects it (cancel, which frees the space)."""
+        prop = require(self.session, Property, values["property_id"], "Property")
+        self._space(prop.id, values["space_id"])
+        contract = TenantOccupancy(
+            **values,
+            status=ContractStatus.PENDING,
+            created_by=self.actor.id if self.actor else None,
+        )
+        self.session.add(contract)
+        flush(self.session)
+        self.session.refresh(contract, ["reference"])
+        self._hold(contract)
+        self._log("requested", contract)
+        commit(self.session)
+        return contract
+
     def update(self, contract_id: uuid.UUID, values: dict[str, Any]) -> ContractRead:
         contract = self._get(contract_id)
         dates = {k: values.pop(k) for k in ("start_date", "end_date") if k in values}
@@ -230,6 +251,9 @@ class ContractService:
         for field, value in {**values, **dates}.items():
             setattr(contract, field, value)
         self._check_order(contract)
+        if dates and self.engine.for_contract(contract.id) is not None:
+            # A requested contract already holds its space: move the hold with the dates.
+            self._hold(contract)
         self._log("updated", contract)
         commit(self.session)
         return self.get(contract_id)
@@ -524,6 +548,12 @@ class ContractService:
             )
         }
         today = business_today()
+        # A customer's pending request holds its space too; read the holds, not the status.
+        held = {
+            c.id
+            for c in contracts
+            if c.status == ContractStatus.PENDING and self.engine.for_contract(c.id) is not None
+        }
         out = []
         for c in contracts:
             space = spaces.get(c.space_id) if c.space_id else None
@@ -543,7 +573,7 @@ class ContractService:
                     end_date=c.end_date,
                     original_end_date=c.original_end_date,
                     status=status,  # type: ignore[arg-type]
-                    holds_inventory=c.status in HOLDING_CONTRACT_STATUSES,
+                    holds_inventory=c.status in HOLDING_CONTRACT_STATUSES or c.id in held,
                     monthly_rent=c.monthly_rent,
                     security_deposit=c.security_deposit,
                     currency=c.currency,

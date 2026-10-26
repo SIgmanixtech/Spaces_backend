@@ -31,6 +31,7 @@ from app.models.enums import (
     AmenityStatus,
     BillingPeriod,
     BookingStatus,
+    ContractStatus,
     FileKind,
     LayoutStatus,
     PropertyStatus,
@@ -607,6 +608,11 @@ class CatalogueService:
             )
         hold = direct[0]
         where = "" if hold.relation == "same" else f' (as part of "{hold.space_name}")'
+        if hold.kind == "CONTRACT" and hold.status == ContractStatus.PENDING:
+            return answer(
+                "RESERVED",
+                f"Reserved for a contract awaiting approval for some of that time{where}.",
+            )
         if hold.kind == "CONTRACT":
             return answer("OCCUPIED", f"Occupied under a lease for some of that time{where}.")
         if hold.status == BookingStatus.PENDING:

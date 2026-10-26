@@ -51,6 +51,8 @@ def test_every_business_route_requires_authentication(client: TestClient) -> Non
         "/api/v1/customer/register",
         "/api/v1/customer/password-recovery",
         "/api/v1/customer/resend-confirmation",
+        "/api/v1/customer/otp/request",
+        "/api/v1/customer/otp/verify",
     }
     # The published-property catalogue is public by design and lives under its own prefix.
     catalogue = "/api/v1/public/"

@@ -14,7 +14,9 @@ from app.api.responses import NOT_FOUND, PROTECTED, VALIDATION_ERROR, _error
 from app.api.v1.endpoints.files import StorageFactory
 from app.core.security import TokenVerifier
 from app.models.enums import BookingStatus
+from app.schemas.auth import SessionRead
 from app.schemas.client import (
+    ContractFromBooking,
     CustomerBooking,
     CustomerBookingCancel,
     CustomerBookingCreate,
@@ -24,13 +26,15 @@ from app.schemas.client import (
     CustomerProfile,
     CustomerProfileUpdate,
     CustomerRegister,
+    OtpRequest,
+    OtpVerify,
     PasswordRecovery,
     RegistrationResult,
 )
 from app.schemas.common import Page
 from app.services.auth import SupabaseAuthGateway, get_auth_gateway
 from app.services.catalogue import CatalogueService
-from app.services.customers import CustomerService, register
+from app.services.customers import CustomerService, otp_sign_in, register
 
 router = APIRouter(prefix="/customer", tags=["Customer"])
 Gateway = Annotated[SupabaseAuthGateway, Depends(get_auth_gateway)]
@@ -188,6 +192,64 @@ def cancel_booking(
 ) -> CustomerBooking:
     """Pending or confirmed bookings that have not started yet."""
     return CustomerService(session, user).cancel(booking_id, body.reason if body else None)
+
+
+@router.post(
+    "/otp/request", status_code=202, responses=VALIDATION_ERROR, summary="Email a sign-in code"
+)
+def request_otp(body: OtpRequest, gateway: Gateway) -> dict[str, str]:
+    """Public. Emails a 6-digit sign-in code. A new address gets an account on first sign-in."""
+    gateway.send_otp(str(body.email).strip().lower())
+    return {"message": "A sign-in code is on its way. It is valid for a few minutes."}
+
+
+@router.post(
+    "/otp/verify",
+    response_model=SessionRead,
+    responses={**VALIDATION_ERROR, 401: _error("The code is wrong or has expired.")},
+    summary="Sign in with the emailed code",
+)
+def verify_otp(
+    body: OtpVerify, session: DbSession, gateway: Gateway, verifier: Verifier
+) -> SessionRead:
+    """Public. Returns a session for the customer; creates their account on first sign-in."""
+    return otp_sign_in(
+        session,
+        gateway,
+        verifier,
+        email=str(body.email),
+        code=body.code,
+        full_name=body.full_name,
+    )
+
+
+@router.post(
+    "/bookings/{booking_id}/contract",
+    response_model=CustomerContract,
+    status_code=201,
+    responses={**PROTECTED, **NOT_FOUND, 409: _error("The booking or space cannot be contracted.")},
+    summary="Turn a reservation into a contract request",
+)
+def contract_from_booking(
+    user: CurrentCustomer, session: DbSession, booking_id: uuid.UUID, body: ContractFromBooking
+) -> CustomerContract:
+    """The booking is replaced by a contract request that holds the space for its dates, so
+    no other customer can take it. If the property team rejects it, the space is free again."""
+    return CustomerService(session, user).request_contract(
+        booking_id, body.start_date, body.months, body.notes
+    )
+
+
+@router.post(
+    "/contracts/{contract_id}/withdraw",
+    response_model=CustomerContract,
+    responses={**PROTECTED, **NOT_FOUND, 409: _error("The contract is no longer a request.")},
+    summary="Withdraw my contract request",
+)
+def withdraw_contract(
+    user: CurrentCustomer, session: DbSession, contract_id: uuid.UUID
+) -> CustomerContract:
+    return CustomerService(session, user).withdraw_contract(contract_id)
 
 
 @router.get(

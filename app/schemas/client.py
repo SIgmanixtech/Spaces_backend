@@ -236,6 +236,26 @@ class PasswordRecovery(InputSchema):
     email: EmailStr
 
 
+class OtpRequest(InputSchema):
+    email: EmailStr
+
+
+class OtpVerify(InputSchema):
+    email: EmailStr
+    code: str = Field(min_length=6, max_length=10, pattern=r"^[0-9]+$")
+    full_name: str | None = Field(
+        default=None, min_length=1, max_length=200, description="Used for a first sign-in only."
+    )
+
+
+class ContractFromBooking(InputSchema):
+    """Turn a reservation into a contract request for the same space."""
+
+    start_date: date
+    months: int = Field(ge=1, le=120)
+    notes: str | None = Field(default=None, max_length=1000)
+
+
 class CustomerProfile(ReadSchema):
     id: uuid.UUID
     email: str
@@ -361,6 +381,9 @@ class CustomerDashboard(ReadSchema):
 
     upcoming: list[CustomerBooking] = Field(description="Bookings not yet ended, soonest first.")
     reserved: int = Field(description="Upcoming bookings awaiting confirmation (PENDING).")
+    contract_requests: int = Field(
+        default=0, description="Contract requests waiting for the property team."
+    )
     booked: int = Field(description="Upcoming confirmed bookings.")
     active_leases: list[LeaseDue]
     monthly_rent: dict[str, float] = Field(

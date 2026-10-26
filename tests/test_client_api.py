@@ -11,7 +11,7 @@ from datetime import UTC, date, datetime, timedelta
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.main import app
@@ -789,3 +789,161 @@ def test_free_spaces_lists_only_what_can_be_taken_by_floor(
     # An unlisted property shows nothing.
     api.patch(f"{V1}/properties/{hub['property']['id']}", json={"is_published": False})
     assert free()["floors"] == []
+
+
+# --- reservation -> contract request -> approved or rejected --------------------------------
+
+
+def test_a_reservation_becomes_a_contract_request_that_holds_the_space(
+    api: TestClient, priya: TestClient, ravi: TestClient, hub: dict
+) -> None:
+    mine = book(priya, hub["seat1"])
+    start = (MONDAY + timedelta(days=3)).date()
+    request = priya.post(
+        f"{CUSTOMER}/bookings/{mine['id']}/contract",
+        json={"start_date": str(start), "months": 3, "notes": "Team of one"},
+    )
+    assert request.status_code == 201, request.text
+    contract = request.json()
+    assert contract["status"] == "PENDING" and contract["space_name"] == "Seat 1"
+    assert (contract["start_date"], contract["end_date"]) == (
+        str(start),
+        str(start.replace(month=start.month + 3) - timedelta(days=1))
+        if start.month <= 9
+        else contract["end_date"],
+    )
+    # The reservation was replaced by the request.
+    assert priya.get(f"{CUSTOMER}/bookings/{mine['id']}").json()["status"] == "CANCELLED"
+    assert priya.get(f"{CUSTOMER}/dashboard").json()["contract_requests"] == 1
+
+    # While it waits, no one else sees or takes Seat 1 for those dates.
+    during = datetime.combine(start, datetime.min.time(), tzinfo=UTC) + timedelta(days=10, hours=5)
+    assert floor_states(ravi, hub, during)["Seat 1"] == "RESERVED"
+    assert book(ravi, hub["seat1"], start=during, expected=409)["detail"].startswith("Reserved")
+    free = ravi.get(
+        f"{PUBLIC}/free-spaces",
+        params={"start_at": iso(during), "end_at": iso(during + timedelta(hours=1))},
+    ).json()
+    assert "Seat 1" not in [s["name"] for f in free["floors"] for s in f["spaces"]]
+
+    # The property team sees it as a pending contract and rejects it: the seat is free again.
+    listed = api.get(f"{V1}/contracts", params={"status": "PENDING"}).json()["items"]
+    assert [c["reference"] for c in listed] == [contract["reference"]]
+    assert listed[0]["holds_inventory"] is True
+    rejected = api.post(f"{V1}/contracts/{contract['id']}/cancel", json={"reason": "Not now"})
+    assert rejected.status_code == 200, rejected.text
+    assert floor_states(ravi, hub, during)["Seat 1"] == "AVAILABLE"
+    mine_now = priya.get(f"{CUSTOMER}/contracts").json()[0]
+    assert mine_now["status"] == "CANCELLED"
+    messages = [a["message"] for a in priya.get(f"{CUSTOMER}/dashboard").json()["activity"]]
+    assert f"Lease {contract['reference']} was cancelled by the property team." in messages
+
+
+def test_a_contract_request_can_be_approved_or_withdrawn(
+    api: TestClient, priya: TestClient, ravi: TestClient, hub: dict
+) -> None:
+    start = (MONDAY + timedelta(days=3)).date()
+    first = book(priya, hub["seat1"])
+    approved = priya.post(
+        f"{CUSTOMER}/bookings/{first['id']}/contract", json={"start_date": str(start), "months": 1}
+    ).json()
+    assert api.post(f"{V1}/contracts/{approved['id']}/activate").json()["status"] == "ACTIVE"
+    during = datetime.combine(start, datetime.min.time(), tzinfo=UTC) + timedelta(days=5, hours=5)
+    assert floor_states(ravi, hub, during)["Seat 1"] == "OCCUPIED"
+    # An approved contract can no longer be withdrawn by the customer.
+    assert priya.post(f"{CUSTOMER}/contracts/{approved['id']}/withdraw").status_code == 409
+
+    second = book(priya, hub["seat2"])
+    waiting = priya.post(
+        f"{CUSTOMER}/bookings/{second['id']}/contract", json={"start_date": str(start), "months": 1}
+    ).json()
+    assert ravi.post(f"{CUSTOMER}/contracts/{waiting['id']}/withdraw").status_code == 404
+    withdrawn = priya.post(f"{CUSTOMER}/contracts/{waiting['id']}/withdraw")
+    assert withdrawn.json()["status"] == "CANCELLED"
+    assert floor_states(ravi, hub, during)["Seat 2"] == "AVAILABLE"
+
+    # A booking that is already cancelled cannot be turned into a contract.
+    assert (
+        priya.post(
+            f"{CUSTOMER}/bookings/{second['id']}/contract",
+            json={"start_date": str(start), "months": 1},
+        ).status_code
+        == 409
+    )
+
+
+def test_contract_terms_end_the_day_before_the_same_date() -> None:
+    from app.services.customers import _add_months
+
+    assert _add_months(date(2026, 1, 1), 12) == date(2026, 12, 31)
+    assert _add_months(date(2026, 1, 31), 1) == date(2026, 2, 27)
+    assert _add_months(date(2026, 11, 15), 3) == date(2027, 2, 14)
+
+
+# --- email code sign-in --------------------------------------------------------------------
+
+
+class OtpGateway:
+    def __init__(self, key: ec.EllipticCurvePrivateKey) -> None:
+        self.key, self.sent, self.users = key, [], {}
+
+    def send_otp(self, email: str) -> None:
+        self.sent.append(email)
+        self.users.setdefault(email, uuid.uuid4())
+
+    def verify_otp(self, email: str, code: str) -> SupabaseSession:
+        from app.core.errors import UnauthorizedError
+
+        if code != "123456" or email not in self.users:
+            raise UnauthorizedError("That code is wrong or has expired. Ask for a new one.")
+        token = make_token(self.key, self.users[email], email=email)
+        return SupabaseSession(token, "refresh", 3600)
+
+
+def test_customers_sign_in_with_an_emailed_code(
+    verifier: None, db_session: Session, signing_key
+) -> None:
+    gateway = OtpGateway(signing_key)
+    app.dependency_overrides[get_auth_gateway] = lambda: gateway
+    try:
+        client = TestClient(app)
+        assert (
+            client.post(f"{CUSTOMER}/otp/request", json={"email": "New@Example.com"}).status_code
+            == 202
+        )
+        assert gateway.sent == ["new@example.com"]
+        wrong = client.post(
+            f"{CUSTOMER}/otp/verify", json={"email": "new@example.com", "code": "000000"}
+        )
+        assert wrong.status_code == 401
+        first = client.post(
+            f"{CUSTOMER}/otp/verify",
+            json={"email": "new@example.com", "code": "123456", "full_name": "Meera"},
+        )
+        assert first.status_code == 200, first.text
+        assert first.json()["user"]["role"] == "CUSTOMER"
+        tenant = db_session.scalar(select(Tenant).where(Tenant.email == "new@example.com"))
+        assert tenant is not None and tenant.name == "Meera"
+        # Signing in again uses the same account and tenant.
+        again = client.post(
+            f"{CUSTOMER}/otp/verify", json={"email": "new@example.com", "code": "123456"}
+        )
+        assert again.json()["user"]["id"] == first.json()["user"]["id"]
+        assert db_session.scalar(select(func.count()).select_from(Tenant)) == 1
+        # An administrator cannot sign in to the customer app with a code.
+        admin_id = uuid.uuid4()
+        db_session.add(AppUser(id=admin_id, email="boss@example.com", role=UserRole.ADMIN))
+        db_session.commit()
+        gateway.users["boss@example.com"] = admin_id
+        refused = client.post(
+            f"{CUSTOMER}/otp/verify", json={"email": "boss@example.com", "code": "123456"}
+        )
+        assert refused.status_code == 403
+        assert (
+            client.post(
+                f"{CUSTOMER}/otp/verify", json={"email": "x@example.com", "code": "12ab56"}
+            ).status_code
+            == 422
+        )
+    finally:
+        app.dependency_overrides.pop(get_auth_gateway, None)

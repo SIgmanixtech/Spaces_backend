@@ -17,7 +17,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.errors import BadRequestError, ConflictError, NotFoundError
+from app.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
 from app.core.security import TokenVerifier
 from app.models.activity import ActivityLog
 from app.models.booking import Booking
@@ -44,10 +44,10 @@ from app.schemas.client import (
 )
 from app.schemas.common import ListQuery
 from app.services.auth import SupabaseAuthGateway, open_session
-from app.services.base import commit, log_activity
+from app.services.base import commit, log_activity, one_transaction
 from app.services.bookings import BookingService
 from app.services.catalogue import CatalogueService
-from app.services.contracts import effective_status
+from app.services.contracts import ContractService, effective_status
 from app.services.occupancy import business_today
 from app.services.pricing import PricingService, periods_in
 
@@ -403,6 +403,13 @@ class CustomerService:
         return CustomerDashboard(
             upcoming=self._read(list(open_rows[:upcoming_limit])),
             reserved=sum(1 for b in open_rows if b.status == BookingStatus.PENDING),
+            contract_requests=self.session.scalar(
+                select(func.count()).where(
+                    TenantOccupancy.tenant_id == tenant.id,
+                    TenantOccupancy.status == ContractStatus.PENDING,
+                )
+            )
+            or 0,
             booked=sum(1 for b in open_rows if b.status == BookingStatus.CONFIRMED),
             active_leases=leases,
             monthly_rent=rent,
@@ -458,6 +465,73 @@ class CustomerService:
                 )
             )
         return found
+
+    def request_contract(
+        self, booking_id: uuid.UUID, start_date: date, months: int, notes: str | None
+    ) -> CustomerContract:
+        """Turn one of the customer's reservations into a contract request for that space.
+        The booking is replaced by the request, which holds the space for the contract dates
+        until the property team approves or rejects it. Both happen together or not at all."""
+        booking = self._own_booking(booking_id)
+        if booking.status not in CANCELLABLE or booking.end_at <= datetime.now(UTC):
+            raise ConflictError("Only a current reservation can be turned into a contract.")
+        if start_date < business_today():
+            raise BadRequestError("The contract cannot start in the past.")
+        end_date = _add_months(start_date, months)
+        rent = None
+        try:
+            _, estimate = PricingService(self.session).estimate(
+                booking.space_id, BillingPeriod.MONTHLY, on=start_date
+            )
+            rent = estimate.recurring_total
+        except (NotFoundError, BadRequestError):
+            pass
+        tenant = self.tenant()
+        try:
+            with one_transaction(self.session):
+                BookingService(self.session, self.user).cancel(
+                    booking.id, "Turned into a contract request by the customer."
+                )
+                contract = ContractService(self.session, self.user).request(
+                    {
+                        "tenant_id": tenant.id,
+                        "property_id": booking.property_id,
+                        "space_id": booking.space_id,
+                        "booking_id": booking.id,
+                        "start_date": start_date,
+                        "end_date": end_date,
+                        "monthly_rent": rent,
+                        "currency": "INR",
+                        "notes": (
+                            f"Requested by the customer from booking {booking.reference}."
+                            + (f" Note: {notes}" if notes else "")
+                        ),
+                    }
+                )
+            commit(self.session)
+        except BaseException:
+            self.session.rollback()
+            raise
+        return self._contract(self.session.get(TenantOccupancy, contract.id))
+
+    def withdraw_contract(self, contract_id: uuid.UUID) -> CustomerContract:
+        """Withdraw a contract request that the property team has not approved yet."""
+        tenant = self.tenant()
+        row = (
+            self.session.scalar(
+                select(TenantOccupancy).where(
+                    TenantOccupancy.id == contract_id, TenantOccupancy.tenant_id == tenant.id
+                )
+            )
+            if tenant
+            else None
+        )
+        if row is None:
+            raise NotFoundError("Contract not found.")
+        if row.status != ContractStatus.PENDING:
+            raise ConflictError("Only a request that is still waiting can be withdrawn.")
+        ContractService(self.session, self.user).cancel(row.id, "Withdrawn by the customer.")
+        return self._contract(self.session.get(TenantOccupancy, row.id))
 
     def contracts(self) -> list[CustomerContract]:
         tenant = self.tenant()
@@ -519,6 +593,7 @@ _ACTIONS = {
     "rescheduled": "was moved to a new time",
     "completed": "was completed",
     "cancelled": "was cancelled",
+    "requested": "was requested and is waiting for the property team",
     "activated": "started",
     "extended": "was extended",
     "renewed": "was renewed",
@@ -539,3 +614,52 @@ def _next_monthly_date(start: date, today: date, end: date | None) -> date | Non
         if month == 13:
             year, month = year + 1, 1
     return None
+
+
+def _add_months(start: date, months: int) -> date:
+    """The last day of a term of whole months: 1 Jan + 12 months ends 31 Dec."""
+    month = start.month - 1 + months
+    year, month = start.year + month // 12, month % 12 + 1
+    day = min(start.day, monthrange(year, month)[1])
+    return date.fromordinal(date(year, month, day).toordinal() - 1)
+
+
+def otp_sign_in(
+    session: Session,
+    gateway: SupabaseAuthGateway,
+    verifier: TokenVerifier,
+    *,
+    email: str,
+    code: str,
+    full_name: str | None,
+):  # type: ignore[no-untyped-def]
+    """Sign a customer in with the code emailed to them. A first sign-in creates their
+    customer account and tenant record; an administrator account is refused here."""
+    email = email.strip().lower()
+    supabase_session = gateway.verify_otp(email, code)
+    claims = verifier.verify(supabase_session.access_token)
+    user = session.get(AppUser, claims.subject)
+    if user is None:
+        name = (full_name or "").strip() or email.split("@")[0]
+        user = AppUser(id=claims.subject, email=email, full_name=name, role=UserRole.CUSTOMER)
+        session.add(user)
+        session.flush()
+        if session.scalar(select(Tenant.id).where(Tenant.user_id == user.id)) is None:
+            tenant = Tenant(name=name, email=email, user_id=user.id)
+            session.add(tenant)
+            session.flush()
+            log_activity(
+                session,
+                user,
+                action="registered",
+                entity_type="tenants",
+                entity_id=tenant.id,
+                property_id=None,
+                message=f'Customer "{name}" registered with an email code.',
+            )
+        commit(session)
+    elif user.role != UserRole.CUSTOMER:
+        raise ForbiddenError(
+            "This is the customer app. Administrators sign in to the SIGMANIX admin application."
+        )
+    return open_session(session, verifier, supabase_session)

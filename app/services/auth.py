@@ -125,6 +125,20 @@ class SupabaseAuthGateway:
         )
         return SignUp(user_id=user["id"], session=session, existing=False)
 
+    def send_otp(self, email: str) -> None:
+        """Email a one-time sign-in code, creating the Supabase user on first use."""
+        response = self._post("/otp", json={"email": email, "create_user": True})
+        if response.status_code == 429:
+            raise ServiceUnavailableError(
+                "Too many codes were requested. Wait a minute, then ask for a new code."
+            )
+        if response.status_code >= 500:
+            raise ServiceUnavailableError("The sign-in code could not be sent. Try again later.")
+
+    def verify_otp(self, email: str, code: str) -> SupabaseSession:
+        response = self._post("/verify", json={"type": "email", "email": email, "token": code})
+        return self._session(response, "That code is wrong or has expired. Ask for a new one.")
+
     def resend_confirmation(self, email: str) -> None:
         """Email the sign-up confirmation link again. Silent about unknown addresses."""
         with suppress(ServiceUnavailableError):
