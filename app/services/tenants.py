@@ -21,6 +21,7 @@ from app.services.base import (
     page_of,
     require,
 )
+from app.services.client_access import access_status, invitation_blocker
 from app.services.locations import check_space
 from app.services.occupancy import (
     OPEN_BOOKING_STATUSES,
@@ -149,6 +150,12 @@ class TenantService(CrudService[Tenant]):
                         "space_name": space_name,
                         "occupancy_status": status,
                         "booking_refs": booking_refs[tenant.id],
+                        "client_access": access_status(tenant),
+                        "client_access_blocker": (
+                            None
+                            if tenant.client_activated_at is not None
+                            else invitation_blocker(self.session, tenant)
+                        ),
                     }
                 )
             )

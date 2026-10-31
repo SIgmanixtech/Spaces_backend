@@ -259,10 +259,12 @@ class ContractService:
         return self.get(contract_id)
 
     def activate(self, contract_id: uuid.UUID) -> ContractRead:
+        """Approving one seat of a group approves every pending seat of it, together."""
         contract = self._lock(contract_id)
         if contract.status != ContractStatus.PENDING:
             raise ConflictError(f"A {contract.status.lower()} contract cannot be activated.")
-        self._activate(contract)
+        for member in self._group(contract, ContractStatus.PENDING):
+            self._activate(member)
         commit(self.session)
         return self.get(contract_id)
 
@@ -276,7 +278,8 @@ class ContractService:
             raise ConflictError(
                 "The contract has taken effect. Terminate it instead, so its history is kept."
             )
-        self._cancel(contract, reason)
+        for member in self._group(contract, contract.status):
+            self._cancel(member, reason)
         commit(self.session)
         return self.get(contract_id)
 
@@ -356,6 +359,23 @@ class ContractService:
         if contract is None:
             raise NotFoundError("Contract not found.")
         return contract
+
+    def _group(self, contract: TenantOccupancy, status: str) -> list[TenantOccupancy]:
+        """The contract and, for a several-seat contract, its other rows in the same
+        status, locked. Rows in another state (already ended, say) are left alone."""
+        if contract.group_id is None:
+            return [contract]
+        others = self.session.scalars(
+            select(TenantOccupancy)
+            .where(
+                TenantOccupancy.group_id == contract.group_id,
+                TenantOccupancy.id != contract.id,
+                TenantOccupancy.status == status,
+            )
+            .order_by(TenantOccupancy.reference)
+            .with_for_update()
+        ).all()
+        return [contract, *others]
 
     def _lock(self, contract_id: uuid.UUID) -> TenantOccupancy:
         # Two simultaneous lifecycle changes of one contract must not both act on it.
@@ -547,6 +567,7 @@ class ContractService:
                 )
             )
         }
+        groups = group_details(self.session, {c.group_id for c in contracts if c.group_id})
         today = business_today()
         # A customer's pending request holds its space too; read the holds, not the status.
         held = {
@@ -578,6 +599,7 @@ class ContractService:
                     security_deposit=c.security_deposit,
                     currency=c.currency,
                     terms=c.terms,
+                    contract_type=c.contract_type,
                     notes=c.notes,
                     activated_at=c.activated_at,
                     cancelled_at=c.cancelled_at,
@@ -586,9 +608,45 @@ class ContractService:
                     termination_reason=c.termination_reason,
                     created_at=c.created_at,
                     updated_at=c.updated_at,
+                    group_id=c.group_id,
+                    group_reference=groups[c.group_id][0] if c.group_id in groups else None,
+                    group_spaces=groups[c.group_id][1] if c.group_id in groups else [],
                 )
             )
         return out
 
 
-__all__ = ["Conflict", "ContractService", "effective_status"]
+def group_details(
+    session: Session, group_ids: set[uuid.UUID]
+) -> dict[uuid.UUID, tuple[str, list[str]]]:
+    """For each several-seat contract: its first reference and every seat's name."""
+    if not group_ids:
+        return {}
+    rows = session.execute(
+        select(TenantOccupancy.group_id, TenantOccupancy.reference, Space.name)
+        .join(Space, Space.id == TenantOccupancy.space_id)
+        .where(TenantOccupancy.group_id.in_(group_ids))
+        .order_by(TenantOccupancy.reference)
+    ).all()
+    out: dict[uuid.UUID, tuple[str, list[str]]] = {}
+    for group_id, reference, name in rows:
+        first, names = out.get(group_id, (reference, []))
+        names.append(name)
+        out[group_id] = (first, names)
+    return out
+
+
+def group_members(session: Session, contract: TenantOccupancy) -> list[TenantOccupancy]:
+    """Every row of a several-seat contract, first reference first; or just the contract."""
+    if contract.group_id is None:
+        return [contract]
+    return list(
+        session.scalars(
+            select(TenantOccupancy)
+            .where(TenantOccupancy.group_id == contract.group_id)
+            .order_by(TenantOccupancy.reference)
+        )
+    )
+
+
+__all__ = ["Conflict", "ContractService", "effective_status", "group_details", "group_members"]

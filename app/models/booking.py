@@ -82,6 +82,9 @@ class Booking(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         String(32), nullable=False, server_default=BookingStatus.PENDING.value, index=True
     )
     notes: Mapped[str | None] = mapped_column(Text)
+    # Bookings made together (several seats at once) share one id; each still holds
+    # only its own space.
+    group_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancellation_reason: Mapped[str | None] = mapped_column(String(500))
     created_by: Mapped[uuid.UUID | None] = mapped_column(

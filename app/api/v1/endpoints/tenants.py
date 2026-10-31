@@ -1,13 +1,15 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
 from app.api.dependencies import CurrentAdmin, DbSession, ListParams
-from app.api.responses import CONFLICT, NOT_FOUND, PROTECTED
+from app.api.responses import CONFLICT, NOT_FOUND, PROTECTED, _error
 from app.models.enums import OccupancyStatus, TenantStatus
 from app.schemas.common import Page, RemovalRead
 from app.schemas.tenant import (
+    ClientAccessRead,
+    ClientAccessRequest,
     OccupancyCreate,
     OccupancyRead,
     OccupancyUpdate,
@@ -15,7 +17,11 @@ from app.schemas.tenant import (
     TenantRead,
     TenantUpdate,
 )
+from app.services.auth import SupabaseAuthGateway, get_auth_gateway
+from app.services.client_access import ClientAccessService
 from app.services.tenants import TenantService
+
+Gateway = Annotated[SupabaseAuthGateway, Depends(get_auth_gateway)]
 
 router = APIRouter(prefix="/tenants", tags=["Tenants"], responses=PROTECTED)
 occupancy_router = APIRouter(
@@ -54,6 +60,31 @@ def list_tenants(
 def create_tenant(admin: CurrentAdmin, session: DbSession, body: TenantCreate) -> TenantRead:
     service = TenantService(session, admin)
     return service.to_read([service.create(body.model_dump())])[0]
+
+
+@router.post(
+    "/{tenant_id}/client-access",
+    response_model=ClientAccessRead,
+    responses={**NOT_FOUND, **CONFLICT, 503: _error("Supabase could not be reached.")},
+    summary="Invite a tenant to the client app (or invite again)",
+)
+def invite_to_client_app(
+    admin: CurrentAdmin,
+    session: DbSession,
+    gateway: Gateway,
+    tenant_id: uuid.UUID,
+    body: ClientAccessRequest | None = None,
+) -> ClientAccessRead:
+    """Only for a tenant with a completed contract (approved, agreement recorded as signed)
+    and an email address. Safe to repeat: the tenant keeps one sign-in and one customer
+    account. With send_email false (or when Supabase cannot send), a link to share is
+    returned instead; the answer never claims an email was delivered."""
+    request = body or ClientAccessRequest()
+    return ClientAccessRead.model_validate(
+        ClientAccessService(session, admin, gateway).invite(
+            tenant_id, send_email=request.send_email
+        )
+    )
 
 
 @router.get("/{tenant_id}", response_model=TenantRead, responses=NOT_FOUND, summary="Get a tenant")

@@ -53,6 +53,28 @@ def get_current_user(
 CurrentUser = Annotated[AppUser, Depends(get_current_user)]
 
 
+def get_optional_customer(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+    session: DbSession,
+    verifier: Annotated[TokenVerifier, Depends(get_token_verifier)],
+) -> AppUser | None:
+    """For public endpoints that do more for a signed-in customer. Anything else (no token,
+    an invalid or expired one, an administrator) reads as a visitor; it never fails."""
+    if credentials is None:
+        return None
+    try:
+        claims = verifier.verify(credentials.credentials)
+    except Exception:
+        return None
+    user = session.get(AppUser, claims.subject)
+    if user is None or not user.is_active or user.role != UserRole.CUSTOMER:
+        return None
+    return user
+
+
+OptionalCustomer = Annotated[AppUser | None, Depends(get_optional_customer)]
+
+
 def require_roles(*roles: UserRole) -> Callable[[AppUser], AppUser]:
     def dependency(user: CurrentUser) -> AppUser:
         if user.role not in roles:
@@ -63,8 +85,22 @@ def require_roles(*roles: UserRole) -> Callable[[AppUser], AppUser]:
 
 
 CurrentAdmin = Annotated[AppUser, Depends(require_roles(UserRole.ADMIN))]
-# The client app's customers. Admin and customer permissions never overlap.
-CurrentCustomer = Annotated[AppUser, Depends(require_roles(UserRole.CUSTOMER))]
+
+
+def require_active_customer(user: CurrentUser, session: DbSession) -> AppUser:
+    """The client app's customers: only tenants the property team invited, who have set
+    a password (BR-003). Checked on every request, so deactivating a tenant takes effect
+    at once. Admin and customer permissions never overlap."""
+    from app.services.client_access import NOT_ACTIVATED, active_tenant
+
+    if user.role != UserRole.CUSTOMER:
+        raise ForbiddenError("You do not have permission to perform this action.")
+    if active_tenant(session, user) is None:
+        raise ForbiddenError(NOT_ACTIVATED)
+    return user
+
+
+CurrentCustomer = Annotated[AppUser, Depends(require_active_customer)]
 
 
 def list_query(

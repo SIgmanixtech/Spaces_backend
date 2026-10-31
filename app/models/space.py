@@ -19,7 +19,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
-from app.models.enums import PriceUnit, SpaceOperationalStatus, SpaceType
+from app.models.enums import ContractType, PriceUnit, SpaceOperationalStatus, SpaceType
 from app.models.mixins import ArchivableMixin, TimestampMixin, UUIDPrimaryKeyMixin, enum_check
 
 
@@ -35,6 +35,7 @@ class Space(UUIDPrimaryKeyMixin, TimestampMixin, ArchivableMixin, Base):
     __table_args__ = (
         enum_check("space_type", SpaceType),
         enum_check("operational_status", SpaceOperationalStatus),
+        enum_check("contract_type", ContractType),
         enum_check("price_unit", PriceUnit),
         UniqueConstraint("property_id", "code", name="uq_spaces_property_code"),
         UniqueConstraint("id", "property_id", name="uq_spaces_id_property"),
@@ -126,6 +127,8 @@ class Space(UUIDPrimaryKeyMixin, TimestampMixin, ArchivableMixin, Base):
     y: Mapped[int | None] = mapped_column(Integer)
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
+    # The agreement this space is let under, when an administrator has set it.
+    contract_type: Mapped[str | None] = mapped_column(String(32))
     attributes: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )

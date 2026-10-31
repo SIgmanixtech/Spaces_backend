@@ -114,6 +114,30 @@ def test_summary_counts_each_property_once_by_derived_status(api: TestClient) ->
     assert api.get(f"{V1}/tenants", params={"occupancy_status": "VACANT"}).json()["total"] == 0
 
 
+def test_occupancy_trend_leaves_out_archived_properties_like_the_summary(
+    api: TestClient,
+) -> None:
+    kept = create_property(api, name="Kept House")
+    gone = create_property(api, name="Gone House")
+    desk = space(api, kept, "K1")
+    space(api, gone, "G1")
+    tenant = post(api, "tenants", {"name": "Acme Ltd"})
+    post(
+        api,
+        f"tenants/{tenant['id']}/occupancies",
+        {"property_id": kept["id"], "space_id": desk["id"], "start_date": date.today().isoformat()},
+    )
+    before = api.get(f"{DASHBOARD}/summary").json()
+    assert before["occupancy_rate"] == before["occupancy_trend"][-1]["occupancy_rate"] == 50.0
+
+    # Archiving a property removes its spaces from the summary; the trend must agree.
+    assert api.delete(f"{PROPERTIES}/{gone['id']}").status_code in (200, 204)
+    after = api.get(f"{DASHBOARD}/summary").json()
+    assert (after["total"], after["spaces"]["total"]) == (1, 1)
+    assert after["occupancy_rate"] == 100.0
+    assert after["occupancy_trend"][-1]["occupancy_rate"] == 100.0
+
+
 def test_availability_lists_free_spaces_per_open_property(api: TestClient) -> None:
     alpha = create_property(api, name="Alpha")
     create_property(api, name="No Spaces")

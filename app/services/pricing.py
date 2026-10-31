@@ -54,10 +54,12 @@ from app.schemas.pricing import (
     LegacyPrice,
     PricingRuleRead,
     PropertyPricing,
+    ReimbursementLine,
     SpacePricing,
 )
 from app.services.base import CrudService, require
 from app.services.occupancy import business_today
+from app.services.reimbursements import default_fee_lines
 
 CENT = Decimal("0.01")
 
@@ -394,6 +396,7 @@ class PricingService(CrudService[PricingRule]):
             )
         )
         rules = self._active_rules(property_id, on)
+        fee_lines = default_fee_lines(self.session, property_id)
         by_id = {s.id: s for s in spaces}
         reads = {r.id: r for r in self.to_read(rules)}
         out: list[SpacePricing] = []
@@ -405,7 +408,12 @@ class PricingService(CrudService[PricingRule]):
             for period in BillingPeriod:
                 found = resolve(space, period, rules, by_id)
                 if found is not None:
-                    prices.append(self._effective(space, period, found, reads))
+                    price = self._effective(space, period, found, reads)
+                    if price.estimate is not None:
+                        price.estimate = with_reimbursement(
+                            price.estimate, fee_lines.get(period.value, [])
+                        )
+                    prices.append(price)
             if not prices:
                 unpriced.append(space.id)
             out.append(
@@ -680,3 +688,28 @@ def periods_in(period: BillingPeriod | str, start_at: datetime, end_at: datetime
         }[period]
         raise BadRequestError(f"For a {period.lower().replace('_', '-')} price, book {unit}.")
     return Decimal(count)
+
+
+def with_reimbursement(estimate: EstimateRead, lines: list[Any]) -> EstimateRead:
+    """The estimate with the Reimbursement Fee as its own lines (BR-009, BR-029). The
+    recurring total (what bookings use) is unchanged."""
+    amount = sum((line.amount for line in lines), Decimal(0))
+    tax = sum((line.tax for line in lines), Decimal(0))
+    total = sum((line.total for line in lines), Decimal(0))
+    return estimate.model_copy(
+        update={
+            "reimbursement": float(amount),
+            "reimbursement_tax": float(tax),
+            "reimbursement_lines": [
+                ReimbursementLine(
+                    expense_type=line.expense_type,
+                    amount=float(line.amount),
+                    tax=float(line.tax),
+                    tax_included=line.tax_included,
+                    total=float(line.total),
+                )
+                for line in lines
+            ],
+            "total_with_reimbursement": float(Decimal(str(estimate.recurring_total)) + total),
+        }
+    )

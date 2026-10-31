@@ -12,7 +12,7 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import ColumnElement, exists, or_, select
+from sqlalchemy import ColumnElement, exists, func, or_, select
 
 from app.core.errors import BadRequestError, ConflictError
 from app.models.booking import Booking
@@ -24,7 +24,7 @@ from app.models.space import Space
 from app.models.tenant import TenantOccupancy
 from app.schemas.space import SpaceRead
 from app.services.allocations import AllocationEngine
-from app.services.base import CrudService, commit, flush, require
+from app.services.base import CrudService, commit, flush, one_transaction, require
 from app.services.locations import check_layout
 from app.services.occupancy import (
     OPEN_BOOKING_STATUSES,
@@ -78,6 +78,15 @@ def _label(space_type: SpaceType) -> str:
 def _check_parent_type(child: SpaceType, parent: SpaceType) -> None:
     if parent not in ALLOWED_PARENTS[child]:
         raise BadRequestError(f"A {_label(child)} cannot be placed inside a {_label(parent)}.")
+
+
+# Marks a seat created as one of a workstation's chairs (BR-028).
+WORKSTATION_CHAIR = "workstation_chair"
+MAX_WORKSTATION_CHAIRS = 20
+
+
+def is_workstation_chair(space: Space) -> bool:
+    return bool((space.attributes or {}).get(WORKSTATION_CHAIR))
 
 
 class SpaceService(CrudService[Space]):
@@ -200,7 +209,85 @@ class SpaceService(CrudService[Space]):
     def update(self, record_id: uuid.UUID, values: dict[str, Any]) -> Space:
         if values.get("space_type") == SpaceType.NON_RENTABLE and "is_rentable" not in values:
             values = {**values, "is_rentable": False}
+        existing = self.session.get(Space, record_id)
+        if existing is not None and is_workstation_chair(existing):
+            # A workstation's chair is identified, never let on its own (BR-028).
+            if values.get("is_rentable"):
+                raise BadRequestError(
+                    "A workstation chair cannot be made rentable. Book its workstation instead."
+                )
+            if "attributes" in values:
+                values = {
+                    **values,
+                    "attributes": {**(values["attributes"] or {}), WORKSTATION_CHAIR: True},
+                }
         return super().update(record_id, values)
+
+    def create_workstation(self, values: dict[str, Any]) -> tuple[Space, list[Space]]:
+        """A rentable workstation and its N chairs, created together or not at all (BR-028).
+
+        The chairs are named "<workstation>-Chair 1..N", sit inside the workstation (same
+        floor and layout) and are never rentable. On a layout, the workstation is sized to
+        hold its chairs in two rows and each chair gets its own cell. A repeated request
+        for a workstation of the same name in the same place is refused, so retries never
+        make duplicates."""
+        chairs = int(values.pop("chairs"))
+        name = values["name"].strip()
+        same_name = self.session.scalar(
+            select(Space.id).where(
+                Space.property_id == values["property_id"],
+                Space.space_type == SpaceType.DEDICATED_WORKSTATION,
+                func.lower(Space.name) == name.lower(),
+                Space.archived_at.is_(None),
+            )
+        )
+        if same_name is not None:
+            raise ConflictError(f'A workstation named "{name}" already exists in this property.')
+        columns, rows = max(1, -(-chairs // 2)), (1 if chairs == 1 else 2)
+        placed = values.get("x") is not None and values.get("y") is not None
+        workstation_values = {
+            **values,
+            "name": name,
+            "space_type": SpaceType.DEDICATED_WORKSTATION,
+            "is_rentable": True,
+            "capacity": chairs,
+        }
+        if placed:
+            workstation_values.update(width=columns, height=rows)
+        with one_transaction(self.session):
+            workstation = self.create(workstation_values)
+            made = []
+            for i in range(chairs):
+                made.append(
+                    self.create(
+                        {
+                            "property_id": workstation.property_id,
+                            "floor_id": workstation.floor_id,
+                            "parent_space_id": workstation.id,
+                            "layout_id": workstation.layout_id,
+                            "name": f"{name}-Chair {i + 1}",
+                            "space_type": SpaceType.SEAT,
+                            "is_rentable": False,
+                            "capacity": 1,
+                            "currency": workstation.currency,
+                            "operational_status": workstation.operational_status,
+                            "attributes": {WORKSTATION_CHAIR: True},
+                            **(
+                                {
+                                    "x": workstation.x + i % columns,
+                                    "y": workstation.y + i // columns,
+                                    "width": 1,
+                                    "height": 1,
+                                }
+                                if placed
+                                else {}
+                            ),
+                        }
+                    )
+                )
+        commit(self.session)
+        self.session.refresh(workstation)
+        return workstation, made
 
     def move(
         self, space_id: uuid.UUID, floor_id: uuid.UUID | None, parent_id: uuid.UUID | None

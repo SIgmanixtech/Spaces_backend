@@ -1,6 +1,7 @@
 import uuid
 from datetime import date, datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import (
     CheckConstraint,
@@ -14,11 +15,11 @@ from sqlalchemy import (
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import ExcludeConstraint
+from sqlalchemy.dialects.postgresql import JSONB, ExcludeConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
-from app.models.enums import ContractStatus, TenantStatus
+from app.models.enums import ContractStatus, ContractType, TenantStatus
 from app.models.mixins import ArchivableMixin, TimestampMixin, UUIDPrimaryKeyMixin, enum_check
 
 contract_reference_seq = Sequence("contract_reference_seq", metadata=Base.metadata)
@@ -28,7 +29,13 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, ArchivableMixin, Base):
     """A tenant's identity. Where and when they occupy space is TenantOccupancy."""
 
     __tablename__ = "tenants"
-    __table_args__ = (enum_check("status", TenantStatus),)
+    __table_args__ = (
+        enum_check("status", TenantStatus),
+        CheckConstraint(
+            "client_activated_at IS NULL OR client_invited_at IS NOT NULL",
+            name="activated_after_invited",
+        ),
+    )
 
     name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
     company_name: Mapped[str | None] = mapped_column(String(200))
@@ -38,11 +45,17 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, ArchivableMixin, Base):
         String(32), nullable=False, server_default=TenantStatus.ACTIVE.value
     )
     notes: Mapped[str | None] = mapped_column(Text)
-    # The customer account that owns this tenant record in the client app. Set when a
-    # customer registers; never taken from a request body. One account, one tenant.
+    # The customer account that owns this tenant record in the client app. Set when the
+    # property team invites the tenant; never taken from a request body. One account,
+    # one tenant.
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("app_users.id", ondelete="SET NULL"), unique=True
     )
+    # Client app access: invited by the property team (only with a completed contract
+    # and an email), then activated when the tenant sets a password. Only activated
+    # tenants can use the client app.
+    client_invited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    client_activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class TenantOccupancy(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -67,6 +80,7 @@ class TenantOccupancy(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ),
         CheckConstraint("end_date IS NULL OR end_date >= start_date", name="dates_ordered"),
         enum_check("status", ContractStatus),
+        enum_check("contract_type", ContractType),
         CheckConstraint(
             "(monthly_rent IS NULL OR monthly_rent >= 0)"
             " AND (security_deposit IS NULL OR security_deposit >= 0)",
@@ -113,6 +127,9 @@ class TenantOccupancy(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     booking_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("bookings.id", ondelete="SET NULL")
     )
+    # A contract for several seats is one row per seat sharing one id. The rows are
+    # approved, rejected and withdrawn together and read as one contract.
+    group_id: Mapped[uuid.UUID | None] = mapped_column(index=True)
     start_date: Mapped[date] = mapped_column(Date, nullable=False)
     end_date: Mapped[date | None] = mapped_column(Date)
     # The agreed last day, kept when termination brings end_date forward.
@@ -122,6 +139,12 @@ class TenantOccupancy(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     security_deposit: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
     currency: Mapped[str] = mapped_column(String(3), nullable=False, server_default="INR")
     terms: Mapped[str | None] = mapped_column(Text)
+    # Set by an administrator (or taken from the space): which agreement this is.
+    contract_type: Mapped[str | None] = mapped_column(String(32))
+    # Details the customer supplied for the agreement (legal name, address...).
+    customer_details: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
     activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     cancellation_reason: Mapped[str | None] = mapped_column(Text)

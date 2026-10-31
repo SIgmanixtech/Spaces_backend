@@ -10,12 +10,13 @@ from sqlalchemy import exists, select
 from app.core.errors import ConflictError
 from app.models.amenity import Amenity, PropertyAmenity
 from app.models.booking import Booking
-from app.models.enums import AmenityStatus, OccupancyStatus
+from app.models.enums import AmenityLevel, AmenityStatus, OccupancyStatus
 from app.models.property import Property
 from app.models.tenant import Tenant, TenantOccupancy
 from app.repositories.base import text_search
 from app.schemas.common import ListQuery
 from app.schemas.property import PropertyRead
+from app.services.amenities import LEVEL_WHERE
 from app.services.base import DERIVED_FILTER_LIMIT, CrudService, page_of
 from app.services.occupancy import (
     OPEN_BOOKING_STATUSES,
@@ -108,6 +109,7 @@ class PropertyService(CrudService[Property]):
                 .where(
                     PropertyAmenity.property_id.in_([prop.id for prop in properties]),
                     PropertyAmenity.status == AmenityStatus.ACTIVE,
+                    LEVEL_WHERE[AmenityLevel.PROPERTY],
                 )
                 .order_by(Amenity.name)
             ):

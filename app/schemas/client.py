@@ -6,12 +6,13 @@ Customer schemas describe the signed-in customer's own records.
 """
 
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, time
 from typing import Literal
 
 from pydantic import EmailStr, Field, SecretStr, model_validator
 
 from app.models.enums import (
+    AmenityLevel,
     BillingPeriod,
     BookingStatus,
     DepositRule,
@@ -218,20 +219,6 @@ class QuoteRead(ReadSchema):
 # --- customer accounts ----------------------------------------------------------------
 
 
-class CustomerRegister(InputSchema):
-    email: EmailStr
-    password: SecretStr = Field(min_length=8, max_length=128)
-    full_name: str = Field(min_length=1, max_length=200)
-    phone: str | None = Field(default=None, max_length=32)
-    company_name: str | None = Field(default=None, max_length=200)
-
-
-class RegistrationResult(ReadSchema):
-    status: Literal["SIGNED_IN", "CONFIRMATION_REQUIRED"]
-    message: str
-    session: SessionRead | None
-
-
 class PasswordRecovery(InputSchema):
     email: EmailStr
 
@@ -243,9 +230,22 @@ class OtpRequest(InputSchema):
 class OtpVerify(InputSchema):
     email: EmailStr
     code: str = Field(min_length=6, max_length=10, pattern=r"^[0-9]+$")
-    full_name: str | None = Field(
-        default=None, min_length=1, max_length=200, description="Used for a first sign-in only."
-    )
+
+
+class PhoneOtpRequest(InputSchema):
+    phone: str = Field(min_length=7, max_length=24, description="E.g. 98765 43210 or +91...")
+
+
+class PhoneOtpVerify(InputSchema):
+    phone: str = Field(min_length=7, max_length=24)
+    code: str = Field(min_length=6, max_length=10, pattern=r"^[0-9]+$")
+
+
+class OtpResult(ReadSchema):
+    """Only activated tenants are signed in; anyone else gets 403 (no account is made)."""
+
+    status: Literal["SIGNED_IN"]
+    session: SessionRead
 
 
 class ContractFromBooking(InputSchema):
@@ -258,7 +258,7 @@ class ContractFromBooking(InputSchema):
 
 class CustomerProfile(ReadSchema):
     id: uuid.UUID
-    email: str
+    email: str | None = Field(description="Null for a customer who signed up by mobile number.")
     full_name: str | None
     phone: str | None
     company_name: str | None
@@ -290,6 +290,25 @@ class CustomerBookingCreate(InputSchema):
         return self
 
 
+class CustomerGroupBookingCreate(InputSchema):
+    """Several spaces (for example 5 seats) for the same time, booked together: all of
+    them are booked, or none is."""
+
+    space_ids: list[uuid.UUID] = Field(min_length=2, max_length=50)
+    billing_period: BillingPeriod
+    start_at: datetime
+    end_at: datetime
+    notes: str | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def _check(self) -> "CustomerGroupBookingCreate":
+        if self.end_at <= self.start_at:
+            raise ValueError("end_at must be after start_at")
+        if len(set(self.space_ids)) != len(self.space_ids):
+            raise ValueError("each space can be chosen only once")
+        return self
+
+
 class CustomerBookingReschedule(InputSchema):
     """A new time (and possibly a new billing period) for the same space."""
 
@@ -318,7 +337,9 @@ class CustomerBooking(ReadSchema):
     space_type: SpaceType
     start_at: datetime
     end_at: datetime
-    status: BookingStatus
+    status: BookingStatus | Literal["CONVERTED"] = Field(
+        description="CONVERTED: turned into a contract request (stored as cancelled)."
+    )
     billing_period: BillingPeriod | None
     quoted_total: float | None
     quoted_currency: str | None
@@ -327,6 +348,14 @@ class CustomerBooking(ReadSchema):
     cancelled_at: datetime | None
     cancellation_reason: str | None
     can_cancel: bool
+    contract_id: uuid.UUID | None = Field(
+        default=None, description="For a CONVERTED booking, the contract it was turned into."
+    )
+    contract_reference: str | None = None
+    group_id: uuid.UUID | None = Field(
+        default=None, description="Shared by bookings made together."
+    )
+    group_size: int = Field(default=1, description="How many bookings were made together.")
     created_at: datetime
 
 
@@ -345,6 +374,12 @@ class CustomerContract(ReadSchema):
     security_deposit: float | None
     currency: str
     terms: str | None
+    group_id: uuid.UUID | None = Field(
+        default=None, description="Set when the contract covers several seats."
+    )
+    spaces: list[str] = Field(
+        default_factory=list, description="Every space the contract covers, by name."
+    )
 
 
 class Capabilities(ReadSchema):
@@ -428,3 +463,36 @@ class FreeSpaces(ReadSchema):
     end_at: datetime
     floors: list[FreeFloor]
     total: int
+
+
+class SetPassword(InputSchema):
+    """From the link in an invitation or password-reset email: the tokens Supabase put in
+    the link, and the new password."""
+
+    access_token: str = Field(min_length=20, max_length=4000)
+    refresh_token: str = Field(min_length=1, max_length=4000)
+    password: SecretStr = Field(min_length=8, max_length=128)
+
+
+class PublicAmenitySource(ReadSchema):
+    level: AmenityLevel
+    place_name: str
+    opening_time: time | None
+    closing_time: time | None
+
+
+class PublicAmenity(ReadSchema):
+    """An amenity available at a space: its own, or inherited from a parent space, its
+    floor, building or property (BR-031). Listed once, with where it comes from."""
+
+    name: str
+    description: str | None
+    is_direct: bool
+    sources: list[PublicAmenitySource]
+
+
+class PublicSpaceAmenities(ReadSchema):
+    space_id: uuid.UUID
+    space_name: str
+    property_id: uuid.UUID
+    amenities: list[PublicAmenity]

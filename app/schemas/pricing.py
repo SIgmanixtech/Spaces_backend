@@ -165,7 +165,13 @@ class EstimateRead(ReadSchema):
 
     ``recurring_total`` = rent + maintenance + additional charges, plus tax when tax is
     ADDITIONAL. INCLUDED tax is shown but already inside the other lines. The deposit is
-    a one-time amount and is never part of the recurring total."""
+    a one-time amount and is never part of the recurring total.
+
+    The three charge types (BR-009): Space Fee = ``rent`` (plus any ``additional_charges``
+    still on the rate), Maintenance Fee = ``maintenance``, Reimbursement Fee =
+    ``reimbursement`` with its own tax. Reimbursement is kept out of ``recurring_total``, so
+    booking quotes are unchanged; ``total_with_reimbursement`` adds it, in the admin
+    property pricing view only."""
 
     currency: str
     billing_period: BillingPeriod
@@ -179,6 +185,22 @@ class EstimateRead(ReadSchema):
     tax_included: bool
     recurring_total: float
     deposit: float | None
+    reimbursement: float = Field(
+        default=0, description="Reimbursement Fee before its tax: fixed recurring defaults."
+    )
+    reimbursement_tax: float = 0
+    reimbursement_lines: list["ReimbursementLine"] = Field(default_factory=list)
+    total_with_reimbursement: float | None = Field(
+        default=None, description="recurring_total plus the Reimbursement Fee (admin view)."
+    )
+
+
+class ReimbursementLine(ReadSchema):
+    expense_type: str
+    amount: float
+    tax: float
+    tax_included: bool
+    total: float
 
 
 PriceSource = Literal["OWN", "INHERITED", "BUILDING_DEFAULT", "PROPERTY_DEFAULT"]

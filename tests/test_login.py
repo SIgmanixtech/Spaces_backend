@@ -208,19 +208,7 @@ def test_unconfirmed_sign_in_answers_with_its_own_code(client: TestClient) -> No
     assert response.json()["code"] == "email_not_confirmed"
 
 
-def test_confirmation_email_can_be_sent_again(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    gateway = SupabaseAuthGateway("http://supabase.test/auth/v1", "publishable")
-    calls = _gateway_answering(monkeypatch, 200, {})
-    app.dependency_overrides[get_auth_gateway] = lambda: gateway
-    try:
-        response = client.post(
-            "/api/v1/customer/resend-confirmation", json={"email": "new@example.com"}
-        )
-    finally:
-        app.dependency_overrides.pop(get_auth_gateway, None)
-    assert response.status_code == 202
-    assert calls == [
-        ("http://supabase.test/auth/v1/resend", {"type": "signup", "email": "new@example.com"})
-    ]
+def test_confirmation_emails_are_gone_with_self_registration(client: TestClient) -> None:
+    for base in ("/api/v1/customer", "/api/v1/client"):
+        response = client.post(f"{base}/resend-confirmation", json={"email": "new@example.com"})
+        assert response.status_code == 404

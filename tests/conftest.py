@@ -182,11 +182,17 @@ def db_session(migrated_database: None) -> Iterator[Session]:
     from app.db.session import get_session_factory
 
     session = get_session_factory()()
+    from app.services.reimbursements import seed_expense_types
+
+    seed_expense_types(session)  # reference data the migrations seed
+    session.commit()
     try:
         yield session
     finally:
         session.rollback()
         tables = ", ".join(table.name for table in Base.metadata.sorted_tables)
         session.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
+        # Reference data the migrations seed, put back for the next test.
+        seed_expense_types(session)
         session.commit()
         session.close()

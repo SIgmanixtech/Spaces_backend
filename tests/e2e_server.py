@@ -23,6 +23,10 @@ from sqlalchemy.engine import make_url
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 PORT = int(os.environ.get("E2E_PORT", "8001"))
 E2E_EMAIL = "e2e-admin@example.com"
+# LOCAL DEMO ONLY: the stand-in accepts this code for any requested mobile number or email.
+# Production codes are sent and verified by Supabase Auth; the application never accepts a
+# fixed code.
+DEMO_OTP = "000000"
 E2E_PASSWORD = "e2e-only-password"
 ISSUER = "http://supabase.test/auth/v1"
 AUDIENCE = "authenticated"
@@ -63,10 +67,18 @@ from app.db.base import Base  # noqa: E402
 from app.db.session import get_session_factory  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models.enums import UserRole  # noqa: E402
+from app.models.tenant import Tenant  # noqa: E402
 from app.models.user import AppUser  # noqa: E402
-from app.services.auth import SignUp, SupabaseSession, get_auth_gateway  # noqa: E402
+from app.services.auth import Invitation, SupabaseSession, get_auth_gateway  # noqa: E402
+from app.services.reimbursements import seed_expense_types  # noqa: E402
 
 ADMIN_ID = uuid.uuid4()
+# Tenants already invited and activated, as the property team would leave them (there is
+# no public registration). They sign in with E2E_PASSWORD, or with DEMO_OTP.
+E2E_CUSTOMERS = {
+    "priya-e2e@example.com": (uuid.uuid4(), "Priya Nair"),
+    "ravi-e2e@example.com": (uuid.uuid4(), "Ravi Kumar"),
+}
 _key = ec.generate_private_key(ec.SECP256R1())
 
 
@@ -77,9 +89,15 @@ class StandInAuth:
 
     def __init__(self) -> None:
         self.accounts: dict[str, tuple[uuid.UUID, str]] = {E2E_EMAIL: (ADMIN_ID, E2E_PASSWORD)}
-        self.refresh_tokens: dict[str, tuple[uuid.UUID, str]] = {}
+        for email, (user_id, _name) in E2E_CUSTOMERS.items():
+            self.accounts[email] = (user_id, E2E_PASSWORD)
+        self.refresh_tokens: dict[str, tuple[uuid.UUID, str | None, str | None]] = {}
+        self.code_users: dict[str, uuid.UUID] = {}
+        self.code_users_pending: set[str] = set()
 
-    def _issue(self, user_id: uuid.UUID = ADMIN_ID, email: str = E2E_EMAIL) -> SupabaseSession:
+    def _issue(
+        self, user_id: uuid.UUID = ADMIN_ID, email: str | None = E2E_EMAIL, phone: str | None = None
+    ) -> SupabaseSession:
         now = datetime.now(UTC)
         token = jwt.encode(
             {
@@ -89,13 +107,14 @@ class StandInAuth:
                 "iat": now,
                 "exp": now + timedelta(minutes=30),
                 "email": email,
+                "phone": phone.lstrip("+") if phone else None,
                 "jti": uuid.uuid4().hex,
             },
             _key,
             algorithm="ES256",
         )
         refresh = uuid.uuid4().hex
-        self.refresh_tokens[refresh] = (user_id, email)
+        self.refresh_tokens[refresh] = (user_id, email, phone)
         return SupabaseSession(access_token=token, refresh_token=refresh, expires_in=1800)
 
     def sign_in(self, email: str, password: str) -> SupabaseSession:
@@ -104,16 +123,59 @@ class StandInAuth:
             raise UnauthorizedError("Incorrect email or password.")
         return self._issue(account[0], email.lower())
 
-    def sign_up(self, email: str, password: str, full_name: str) -> SignUp:
-        email = email.lower()
-        if email in self.accounts:
-            return SignUp(user_id=None, session=None, existing=True)
-        user_id = uuid.uuid4()
-        self.accounts[email] = (user_id, password)
-        return SignUp(user_id=str(user_id), session=self._issue(user_id, email), existing=False)
-
     def recover(self, email: str) -> None:
         return None
+
+    # --- one-time codes (local demo: DEMO_OTP, see above) ----------------------------------
+
+    def _code_user(self, contact: str) -> uuid.UUID:
+        if contact.lower() in self.accounts:
+            return self.accounts[contact.lower()][0]
+        return self.code_users.setdefault(contact, uuid.uuid4())
+
+    def send_phone_otp(self, phone: str) -> None:
+        self.code_users_pending.add(phone)
+
+    def verify_phone_otp(self, phone: str, code: str) -> SupabaseSession:
+        if code != DEMO_OTP or phone not in self.code_users_pending:
+            raise UnauthorizedError("That code is wrong or has expired. Ask for a new one.")
+        return self._issue(self._code_user(phone), None, phone)
+
+    def send_otp(self, email: str) -> None:
+        self.code_users_pending.add(email)
+
+    def verify_otp(self, email: str, code: str) -> SupabaseSession:
+        if code != DEMO_OTP or email not in self.code_users_pending:
+            raise UnauthorizedError("That code is wrong or has expired. Ask for a new one.")
+        return self._issue(self._code_user(email), email)
+
+    # --- client app invitations (local stand-in for Supabase's admin API) -------------
+
+    def _account(self, email: str) -> uuid.UUID:
+        email = email.lower()
+        if email not in self.accounts:
+            self.accounts[email] = (uuid.uuid4(), "")  # invited: no password yet
+        return self.accounts[email][0]
+
+    def invite(self, email: str, full_name: str) -> Invitation:
+        return self.invitation_link(email, full_name)  # no email here: always a link
+
+    def invitation_link(self, email: str, full_name: str) -> Invitation:
+        user_id = self._account(email)
+        session = self._issue(user_id, email.lower())
+        link = (
+            "http://localhost:5173/set-password#access_token="
+            f"{session.access_token}&refresh_token={session.refresh_token}&type=invite"
+        )
+        return Invitation(str(user_id), email_requested=False, link=link)
+
+    def set_password(self, access_token: str, password: str) -> None:
+        claims = jwt.decode(access_token, options={"verify_signature": False})
+        for email, (user_id, _) in self.accounts.items():
+            if str(user_id) == claims["sub"]:
+                self.accounts[email] = (user_id, password)
+                return
+        raise UnauthorizedError("This link has expired or was already used. Ask for a new one.")
 
     def refresh(self, refresh_token: str) -> SupabaseSession:
         owner = self.refresh_tokens.pop(refresh_token, None)  # single use, as with Supabase
@@ -132,7 +194,21 @@ def prepare_database() -> None:
     with get_session_factory()() as session:
         tables = ", ".join(table.name for table in Base.metadata.sorted_tables)
         session.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
+        seed_expense_types(session)  # reference data the migrations seed
         session.add(AppUser(id=ADMIN_ID, email=E2E_EMAIL, role=UserRole.ADMIN))
+        now = datetime.now(UTC)
+        for email, (user_id, name) in E2E_CUSTOMERS.items():
+            session.add(AppUser(id=user_id, email=email, full_name=name, role=UserRole.CUSTOMER))
+            session.flush()
+            session.add(
+                Tenant(
+                    name=name,
+                    email=email,
+                    user_id=user_id,
+                    client_invited_at=now,
+                    client_activated_at=now,
+                )
+            )
         session.commit()
 
 
@@ -145,6 +221,10 @@ def main() -> None:
         issuer=ISSUER, audience=AUDIENCE, key_resolver=lambda _token: public_key
     )
     print(f"E2E API on http://127.0.0.1:{PORT}/api/v1 (database: {_parsed.database})", flush=True)
+    print(f"LOCAL DEMO sign-in code for the activated test tenants: {DEMO_OTP}", flush=True)
+    print(
+        f"Activated test tenants: {', '.join(E2E_CUSTOMERS)} (password as the admin's)", flush=True
+    )
     uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="warning")
 
 

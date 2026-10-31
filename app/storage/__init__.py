@@ -41,6 +41,7 @@ class ObjectStorage(Protocol):
     bucket: str
 
     def put(self, path: str, data: bytes, content_type: str) -> None: ...
+    def get(self, path: str) -> bytes: ...
     def signed_url(self, path: str, expires_in: int) -> SignedUrl: ...
     def delete(self, path: str) -> None: ...
     def list_objects(self) -> Iterator[StoredObject]: ...
@@ -85,6 +86,12 @@ class SupabaseStorage:
             content=data,
             headers={"Content-Type": content_type, "x-upsert": "false"},
         )
+
+    def get(self, path: str) -> bytes:
+        """The object's bytes, read with the server-side key (private buckets too)."""
+        return self._call(
+            "GET", f"{self._base}/object/authenticated/{self.bucket}/{quote(path)}"
+        ).content
 
     def signed_url(self, path: str, expires_in: int) -> SignedUrl:
         response = self._call(
@@ -156,6 +163,12 @@ class LocalStorage:
         target = self.resolve(path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
+
+    def get(self, path: str) -> bytes:
+        target = self.resolve(path)
+        if not target.is_file():
+            raise StorageError("The stored file is missing.")
+        return target.read_bytes()
 
     def signed_url(self, path: str, expires_in: int) -> SignedUrl:
         expires = int(time.time()) + expires_in

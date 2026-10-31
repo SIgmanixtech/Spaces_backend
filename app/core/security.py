@@ -23,6 +23,9 @@ _INVALID_TOKEN = "Invalid or expired access token."
 class TokenClaims:
     subject: uuid.UUID
     email: str | None
+    # As the identity provider verified them. Supabase writes phones without "+".
+    phone: str | None = None
+    expires_at: int | None = None
 
 
 class TokenVerifier:
@@ -65,7 +68,12 @@ class TokenVerifier:
                 options={"require": ["exp", "sub", "iss", "aud"]},
                 leeway=10,
             )
-            return TokenClaims(subject=uuid.UUID(claims["sub"]), email=claims.get("email"))
+            return TokenClaims(
+                subject=uuid.UUID(claims["sub"]),
+                email=claims.get("email") or None,
+                phone=claims.get("phone") or None,
+                expires_at=claims.get("exp"),
+            )
         except PyJWKClientConnectionError:
             raise ServiceUnavailableError("The authentication service is unavailable.") from None
         except (jwt.PyJWTError, ValueError, TypeError):

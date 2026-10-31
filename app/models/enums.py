@@ -102,6 +102,15 @@ class AmenityStatus(StrEnum):
     INACTIVE = "INACTIVE"
 
 
+class AmenityLevel(StrEnum):
+    """Where an amenity assignment applies (BR-031). Derived from the ids it carries."""
+
+    PROPERTY = "PROPERTY"
+    BUILDING = "BUILDING"
+    FLOOR = "FLOOR"
+    SPACE = "SPACE"
+
+
 class AssetStatus(StrEnum):
     OPERATIONAL = "OPERATIONAL"
     UNDER_MAINTENANCE = "UNDER_MAINTENANCE"
@@ -118,6 +127,27 @@ class FileKind(StrEnum):
     FLOOR_PLAN = "FLOOR_PLAN"
     DOCUMENT = "DOCUMENT"
     ASSET = "ASSET"
+
+
+class ContractType(StrEnum):
+    """Which agreement a contract is. Set by an administrator, never inferred."""
+
+    SPACE_LEASE = "SPACE_LEASE"
+    COWORKING_LICENCE = "COWORKING_LICENCE"
+
+
+class TemplateStatus(StrEnum):
+    DRAFT = "DRAFT"
+    ACTIVE = "ACTIVE"
+    RETIRED = "RETIRED"
+
+
+class DocumentStatus(StrEnum):
+    GENERATED = "GENERATED"
+    APPROVED = "APPROVED"
+    SENT_FOR_SIGNATURE = "SENT_FOR_SIGNATURE"
+    SIGNED = "SIGNED"
+    SUPERSEDED = "SUPERSEDED"
 
 
 class ContractStatus(StrEnum):
@@ -240,3 +270,24 @@ class RoundingPolicy(StrEnum):
     PAISA = "PAISA"
     RUPEE = "RUPEE"
     TEN_RUPEES = "TEN_RUPEES"
+
+
+class ReimbursementMethod(StrEnum):
+    """FIXED: an agreed amount per billing period (or once). ACTUAL: the admin enters what
+    was really spent for each period."""
+
+    FIXED = "FIXED"
+    ACTUAL = "ACTUAL"
+
+
+class ReimbursementRecurrence(StrEnum):
+    RECURRING = "RECURRING"
+    ONE_TIME = "ONE_TIME"
+
+
+class ReimbursementStatus(StrEnum):
+    """Only REVIEWED expenses may reach an invoice."""
+
+    PENDING_REVIEW = "PENDING_REVIEW"
+    REVIEWED = "REVIEWED"
+    REJECTED = "REJECTED"

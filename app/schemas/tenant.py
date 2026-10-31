@@ -1,6 +1,6 @@
 import uuid
 from datetime import date, datetime
-from typing import ClassVar, Self
+from typing import ClassVar, Literal, Self
 
 from pydantic import EmailStr, Field, model_validator
 
@@ -45,6 +45,17 @@ class TenantRead(ReadSchema):
         "or open booking; otherwise VACANT. Read-only."
     )
     booking_refs: list[str] = Field(description="References of the tenant's bookings.")
+    client_access: Literal["NOT_INVITED", "INVITED", "ACTIVE"] = Field(
+        default="NOT_INVITED",
+        description="Client app access: invited by the property team, active once the "
+        "tenant has set a password.",
+    )
+    client_invited_at: datetime | None = None
+    client_activated_at: datetime | None = None
+    client_access_blocker: str | None = Field(
+        default=None,
+        description="Why the tenant cannot be invited yet (no email, no completed contract).",
+    )
     archived_at: datetime | None
     created_at: datetime
     updated_at: datetime
@@ -92,3 +103,27 @@ class OccupancyRead(ReadSchema):
     notes: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class ClientAccessRequest(InputSchema):
+    send_email: bool = Field(
+        default=True,
+        description="True: ask Supabase to email the invitation. False: only make a link to "
+        "share (nothing is emailed).",
+    )
+
+
+class ClientAccessRead(ReadSchema):
+    tenant_id: uuid.UUID
+    status: Literal["NOT_INVITED", "INVITED", "ACTIVE"]
+    email: str
+    invited_at: datetime | None
+    activated_at: datetime | None
+    email_requested: bool = Field(
+        description="Supabase accepted a request to email the invitation. Delivery is not "
+        "confirmed."
+    )
+    invitation_link: str | None = Field(
+        description="Only when no email was requested: the link to share with the tenant."
+    )
+    message: str

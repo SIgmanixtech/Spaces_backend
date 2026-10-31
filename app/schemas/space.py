@@ -5,7 +5,7 @@ from typing import Any, ClassVar, Self
 
 from pydantic import Field, model_validator
 
-from app.models.enums import PriceUnit, SpaceOperationalStatus, SpaceStatus, SpaceType
+from app.models.enums import ContractType, PriceUnit, SpaceOperationalStatus, SpaceStatus, SpaceType
 from app.schemas.common import InputSchema, ReadSchema, UpdateSchema
 
 _Price = Field(default=None, ge=0, max_digits=12, decimal_places=2)
@@ -41,6 +41,9 @@ class SpaceCreate(InputSchema):
     width: int | None = Field(default=None, ge=1)
     height: int | None = Field(default=None, ge=1)
     attributes: dict[str, Any] = Field(default_factory=dict)
+    contract_type: ContractType | None = Field(
+        default=None, description="The agreement this space is let under, if set."
+    )
 
 
 class SpaceUpdate(UpdateSchema):
@@ -66,6 +69,22 @@ class SpaceUpdate(UpdateSchema):
     width: int | None = Field(default=None, ge=1)
     height: int | None = Field(default=None, ge=1)
     attributes: dict[str, Any] | None = None
+    contract_type: ContractType | None = None
+
+
+class WorkstationCreate(InputSchema):
+    """A rentable workstation and its chairs (each a named, non-rentable seat inside it)."""
+
+    property_id: uuid.UUID
+    floor_id: uuid.UUID | None = None
+    parent_space_id: uuid.UUID | None = Field(
+        default=None, description="Defaults to the floor's whole-floor space."
+    )
+    layout_id: uuid.UUID | None = None
+    name: str = Field(min_length=1, max_length=180, description='E.g. "WS1".')
+    chairs: int = Field(ge=1, le=20, description="How many chairs (1 to 20).")
+    x: int | None = Field(default=None, ge=0)
+    y: int | None = Field(default=None, ge=0)
 
 
 class SpaceMove(InputSchema):
@@ -113,6 +132,12 @@ class SpaceRead(ReadSchema):
     width: int | None
     height: int | None
     attributes: dict[str, Any]
+    contract_type: ContractType | None = None
     archived_at: datetime | None
     created_at: datetime
     updated_at: datetime
+
+
+class WorkstationRead(ReadSchema):
+    workstation: SpaceRead
+    chairs: list[SpaceRead]

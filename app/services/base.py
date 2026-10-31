@@ -29,6 +29,16 @@ _CONSTRAINT_MESSAGES = {
         "The space hierarchy changed while this request was running. Try again."
     ),
     "uq_property_amenities_pair": "This amenity is already assigned to the property.",
+    "uq_property_amenities_building": "This amenity is already assigned to the building.",
+    "uq_property_amenities_floor": "This amenity is already assigned to the floor.",
+    "uq_property_amenities_space": "This amenity is already assigned to the space.",
+    "fk_property_amenities_building_id_buildings": (
+        "This building has amenities assigned to it, or to its floors. Remove those amenity "
+        "assignments first."
+    ),
+    "fk_property_amenities_floor_id_floors": (
+        "This floor has amenities assigned to it. Remove those amenity assignments first."
+    ),
     "uq_assets_asset_tag": "Another asset already uses that asset tag.",
     "uq_amenities_name": "An amenity with that name already exists.",
     "ex_tenant_occupancies_space_dates": (

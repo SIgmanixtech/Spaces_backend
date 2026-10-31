@@ -12,9 +12,9 @@ from __future__ import annotations
 import uuid
 from calendar import monthrange
 from datetime import UTC, date, datetime
+from typing import Any
 
 from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
@@ -40,14 +40,18 @@ from app.schemas.client import (
     CustomerDashboard,
     CustomerProfile,
     LeaseDue,
-    RegistrationResult,
+    OtpResult,
 )
 from app.schemas.common import ListQuery
-from app.services.auth import SupabaseAuthGateway, open_session
-from app.services.base import commit, log_activity, one_transaction
-from app.services.bookings import BookingService
+from app.services.auth import (
+    SupabaseSession,
+    open_session,
+)
+from app.services.base import commit, one_transaction
+from app.services.bookings import BookingService, converted_fields, converted_to
 from app.services.catalogue import CatalogueService
-from app.services.contracts import ContractService, effective_status
+from app.services.client_access import NOT_ACTIVATED
+from app.services.contracts import ContractService, effective_status, group_members
 from app.services.occupancy import business_today
 from app.services.pricing import PricingService, periods_in
 
@@ -58,62 +62,6 @@ TYPE_LABEL = {
 }
 
 
-def register(
-    session: Session,
-    gateway: SupabaseAuthGateway,
-    verifier: TokenVerifier,
-    *,
-    email: str,
-    password: str,
-    full_name: str,
-    phone: str | None,
-    company_name: str | None,
-) -> RegistrationResult:
-    """Create a Supabase user, then the customer account and its tenant record."""
-    email = email.strip().lower()
-    taken = ConflictError("An account with this email already exists. Sign in instead.")
-    if session.scalar(select(AppUser.id).where(func.lower(AppUser.email) == email)):
-        raise taken
-    created = gateway.sign_up(email, password, full_name)
-    if created.existing or created.user_id is None:
-        raise taken
-    user = AppUser(
-        id=uuid.UUID(created.user_id), email=email, full_name=full_name, role=UserRole.CUSTOMER
-    )
-    session.add(user)
-    session.flush()
-    tenant = Tenant(
-        name=full_name, company_name=company_name, email=email, phone=phone, user_id=user.id
-    )
-    session.add(tenant)
-    try:
-        session.flush()
-    except IntegrityError:
-        session.rollback()
-        raise taken from None
-    log_activity(
-        session,
-        user,
-        action="registered",
-        entity_type="tenants",
-        entity_id=tenant.id,
-        property_id=None,
-        message=f'Customer "{full_name}" registered.',
-    )
-    commit(session)
-    if created.session is None:
-        return RegistrationResult(
-            status="CONFIRMATION_REQUIRED",
-            message="Check your email to confirm your address, then sign in.",
-            session=None,
-        )
-    return RegistrationResult(
-        status="SIGNED_IN",
-        message="Your account is ready.",
-        session=open_session(session, verifier, created.session),
-    )
-
-
 class CustomerService:
     def __init__(self, session: Session, user: AppUser) -> None:
         self.session = session
@@ -121,33 +69,29 @@ class CustomerService:
 
     # --- account -----------------------------------------------------------------
 
-    def tenant(self, create: bool = False) -> Tenant | None:
-        tenant = self.session.scalar(select(Tenant).where(Tenant.user_id == self.user.id))
-        if tenant is None and create:
-            # An account made before registration existed (e.g. by an administrator).
-            tenant = Tenant(
-                name=self.user.full_name or self.user.email,
-                email=self.user.email,
-                user_id=self.user.id,
-            )
-            self.session.add(tenant)
-            commit(self.session)
+    def tenant(self) -> Tenant | None:
+        """The tenant this account belongs to. Never created here: tenants come from the
+        property team (BR-005); client endpoints already require an activated tenant."""
+        return self.session.scalar(select(Tenant).where(Tenant.user_id == self.user.id))
+
+    def _own_tenant(self) -> Tenant:
+        tenant = self.tenant()
+        if tenant is None:
+            raise ForbiddenError(NOT_ACTIVATED)
         return tenant
 
     def profile(self) -> CustomerProfile:
-        tenant = self.tenant(create=True)
-        assert tenant is not None
+        tenant = self._own_tenant()
         return CustomerProfile(
             id=self.user.id,
-            email=self.user.email,
+            email=self.user.email or tenant.email,
             full_name=self.user.full_name or tenant.name,
             phone=tenant.phone,
             company_name=tenant.company_name,
         )
 
     def update_profile(self, values: dict[str, object]) -> CustomerProfile:
-        tenant = self.tenant(create=True)
-        assert tenant is not None
+        tenant = self._own_tenant()
         if values.get("full_name"):
             self.user.full_name = str(values["full_name"])
             tenant.name = str(values["full_name"])
@@ -188,6 +132,7 @@ class CustomerService:
         start_at: datetime,
         end_at: datetime,
         notes: str | None,
+        group_id: uuid.UUID | None = None,
     ) -> CustomerBooking:
         """Price and hold a space for the customer. The booking starts PENDING: an
         administrator confirms it, as with every other booking."""
@@ -204,8 +149,7 @@ class CustomerService:
                 f"{space.name} has no {billing_period.lower().replace('_', '-')} price for those "
                 "dates, so it cannot be booked that way."
             ) from None
-        tenant = self.tenant(create=True)
-        assert tenant is not None
+        tenant = self._own_tenant()
         values = {
             "property_id": prop.id,
             "space_id": space.id,
@@ -216,6 +160,7 @@ class CustomerService:
             "start_at": start_at,
             "end_at": end_at,
             "notes": notes,
+            "group_id": group_id,
             "status": BookingStatus.PENDING,
             "channel": BookingChannel.CUSTOMER,
             "billing_period": billing_period,
@@ -231,12 +176,51 @@ class CustomerService:
             # customers'. Say only what this space's state is.
             self.session.rollback()
             state = catalogue.space_availability(space.id, start_at, end_at)
-            raise ConflictError(
+            message = (
                 state.message
                 if not state.available
                 else "The space was taken while you were booking. Choose another time."
-            ) from None
+            )
+            if group_id is not None and space.name not in message:
+                message = f"{space.name}: {message}"
+            raise ConflictError(message) from None
         return self.booking(created.id)
+
+    def book_group(
+        self,
+        catalogue: CatalogueService,
+        *,
+        space_ids: list[uuid.UUID],
+        billing_period: BillingPeriod,
+        start_at: datetime,
+        end_at: datetime,
+        notes: str | None,
+    ) -> list[CustomerBooking]:
+        """Several spaces for the same time, booked together: every one is priced and held,
+        or nothing is booked. They share a group id, so a contract can be requested for
+        all of them at once."""
+        group_id = uuid.uuid4()
+        made: list[uuid.UUID] = []
+        try:
+            with one_transaction(self.session):
+                for space_id in space_ids:
+                    booked = self.book(
+                        catalogue,
+                        space_id=space_id,
+                        billing_period=billing_period,
+                        start_at=start_at,
+                        end_at=end_at,
+                        notes=notes,
+                        group_id=group_id,
+                    )
+                    made.append(booked.id)
+            commit(self.session)
+        except BaseException:
+            self.session.rollback()
+            raise
+        rows = self.session.scalars(select(Booking).where(Booking.id.in_(made))).all()
+        order = {booking_id: i for i, booking_id in enumerate(made)}
+        return self._read(sorted(rows, key=lambda b: order[b.id]))
 
     def reschedule(
         self,
@@ -342,8 +326,22 @@ class CustomerService:
             ).all()
         )
         now = datetime.now(UTC)
+        contracts = converted_to(self.session, bookings)
+        group_ids = {b.group_id for b in bookings if b.group_id}
+        sizes = (
+            dict(
+                self.session.execute(
+                    select(Booking.group_id, func.count())
+                    .where(Booking.group_id.in_(group_ids))
+                    .group_by(Booking.group_id)
+                ).all()
+            )
+            if group_ids
+            else {}
+        )
         return [
             CustomerBooking(
+                **{"status": BookingStatus(b.status), **converted_fields(b, contracts)},
                 id=b.id,
                 reference=b.reference,
                 property_id=b.property_id,
@@ -353,7 +351,6 @@ class CustomerService:
                 space_type=SpaceType(spaces[b.space_id].space_type),
                 start_at=b.start_at,
                 end_at=b.end_at,
-                status=BookingStatus(b.status),
                 billing_period=BillingPeriod(b.billing_period) if b.billing_period else None,
                 quoted_total=float(b.quoted_total) if b.quoted_total is not None else None,
                 quoted_currency=b.quoted_currency,
@@ -363,6 +360,8 @@ class CustomerService:
                 cancellation_reason=b.cancellation_reason,
                 can_cancel=b.status in CANCELLABLE and b.start_at > now,
                 created_at=b.created_at,
+                group_id=b.group_id,
+                group_size=sizes.get(b.group_id, 1) if b.group_id else 1,
             )
             for b in bookings
         ]
@@ -387,6 +386,7 @@ class CustomerService:
         ).all()
         today = business_today()
         leases = []
+        seen_groups: set[uuid.UUID] = set()
         rent: dict[str, float] = {}
         for row in self.session.scalars(
             select(TenantOccupancy)
@@ -395,6 +395,10 @@ class CustomerService:
         ):
             if effective_status(row, today) != ContractStatus.ACTIVE or row.start_date > today:
                 continue
+            if row.group_id is not None:
+                if row.group_id in seen_groups:
+                    continue
+                seen_groups.add(row.group_id)
             contract = self._contract(row)
             due = _next_monthly_date(row.start_date, today, row.end_date)
             leases.append(LeaseDue(contract=contract, next_due_date=due))
@@ -404,7 +408,11 @@ class CustomerService:
             upcoming=self._read(list(open_rows[:upcoming_limit])),
             reserved=sum(1 for b in open_rows if b.status == BookingStatus.PENDING),
             contract_requests=self.session.scalar(
-                select(func.count()).where(
+                select(
+                    func.count(
+                        func.distinct(func.coalesce(TenantOccupancy.group_id, TenantOccupancy.id))
+                    )
+                ).where(
                     TenantOccupancy.tenant_id == tenant.id,
                     TenantOccupancy.status == ContractStatus.PENDING,
                 )
@@ -424,13 +432,19 @@ class CustomerService:
                 select(Booking.id, Booking.reference).where(Booking.tenant_id == tenant.id)
             ).all()
         )
-        contracts = dict(
-            self.session.execute(
-                select(TenantOccupancy.id, TenantOccupancy.reference).where(
-                    TenantOccupancy.tenant_id == tenant.id
-                )
-            ).all()
-        )
+        contract_rows = self.session.execute(
+            select(TenantOccupancy.id, TenantOccupancy.reference, TenantOccupancy.group_id).where(
+                TenantOccupancy.tenant_id == tenant.id
+            )
+        ).all()
+        first_of: dict[uuid.UUID, str] = {}
+        for _, reference, group_id in contract_rows:
+            if group_id and (group_id not in first_of or reference < first_of[group_id]):
+                first_of[group_id] = reference
+        contracts = {
+            row_id: first_of[group_id] if group_id else reference
+            for row_id, reference, group_id in contract_rows
+        }
         ids = [*bookings, *contracts]
         if not ids:
             return []
@@ -445,11 +459,17 @@ class CustomerService:
             .limit(limit)
         ).all()
         found = []
+        said: set[tuple[str, str]] = set()
         for row in rows:
             is_booking = row.entity_type == "bookings"
             reference = (bookings if is_booking else contracts).get(row.entity_id)
             if reference is None:
                 continue
+            if not is_booking:
+                # The seats of one contract change together: say it once.
+                if (row.action, reference) in said:
+                    continue
+                said.add((row.action, reference))
             by_team = row.actor_id != self.user.id
             noun = "Booking" if is_booking else "Lease"
             who = " by the property team" if by_team else ""
@@ -487,32 +507,86 @@ class CustomerService:
         except (NotFoundError, BadRequestError):
             pass
         tenant = self.tenant()
+        # Seats booked together become one contract request covering all of them.
+        members = [booking]
+        if booking.group_id is not None:
+            members += self.session.scalars(
+                select(Booking)
+                .where(
+                    Booking.group_id == booking.group_id,
+                    Booking.id != booking.id,
+                    Booking.tenant_id == booking.tenant_id,
+                    Booking.status.in_(CANCELLABLE),
+                    Booking.end_at > datetime.now(UTC),
+                )
+                .order_by(Booking.reference)
+            ).all()
+            members.sort(key=lambda b: b.reference)
+        group_id = uuid.uuid4() if len(members) > 1 else None
         try:
             with one_transaction(self.session):
-                BookingService(self.session, self.user).cancel(
-                    booking.id, "Turned into a contract request by the customer."
-                )
-                contract = ContractService(self.session, self.user).request(
-                    {
-                        "tenant_id": tenant.id,
-                        "property_id": booking.property_id,
-                        "space_id": booking.space_id,
-                        "booking_id": booking.id,
-                        "start_date": start_date,
-                        "end_date": end_date,
-                        "monthly_rent": rent,
-                        "currency": "INR",
-                        "notes": (
-                            f"Requested by the customer from booking {booking.reference}."
-                            + (f" Note: {notes}" if notes else "")
-                        ),
-                    }
-                )
+                made = []
+                for member in members:
+                    BookingService(self.session, self.user).cancel(
+                        member.id,
+                        "Turned into a contract request by the customer.",
+                        action="converted",
+                    )
+                    made.append(
+                        ContractService(self.session, self.user).request(
+                            {
+                                "tenant_id": tenant.id,
+                                "property_id": member.property_id,
+                                "space_id": member.space_id,
+                                "booking_id": member.id,
+                                "group_id": group_id,
+                                "start_date": start_date,
+                                "end_date": end_date,
+                                "monthly_rent": rent
+                                if member.id == booking.id
+                                else self._monthly_rent(member.space_id, start_date),
+                                "currency": "INR",
+                                "notes": (
+                                    f"Requested by the customer from booking {member.reference}"
+                                    + (f" (one of {len(members)} seats)." if group_id else ".")
+                                    + (f" Note: {notes}" if notes else "")
+                                ),
+                            }
+                        )
+                    )
+                contract = made[0]
             commit(self.session)
         except BaseException:
             self.session.rollback()
             raise
         return self._contract(self.session.get(TenantOccupancy, contract.id))
+
+    def _monthly_rent(self, space_id: uuid.UUID | None, on: date) -> Any:
+        if space_id is None:
+            return None
+        try:
+            _, estimate = PricingService(self.session).estimate(
+                space_id, BillingPeriod.MONTHLY, on=on
+            )
+        except (NotFoundError, BadRequestError):
+            return None
+        return estimate.recurring_total
+
+    def own_contract(self, contract_id: uuid.UUID) -> TenantOccupancy:
+        """One of the signed-in customer's contracts; anyone else's reads as missing."""
+        tenant = self.tenant()
+        row = (
+            self.session.scalar(
+                select(TenantOccupancy).where(
+                    TenantOccupancy.id == contract_id, TenantOccupancy.tenant_id == tenant.id
+                )
+            )
+            if tenant
+            else None
+        )
+        if row is None:
+            raise NotFoundError("Contract not found.")
+        return row
 
     def withdraw_contract(self, contract_id: uuid.UUID) -> CustomerContract:
         """Withdraw a contract request that the property team has not approved yet."""
@@ -542,7 +616,14 @@ class CustomerService:
             .where(TenantOccupancy.tenant_id == tenant.id)
             .order_by(TenantOccupancy.start_date.desc(), TenantOccupancy.id)
         ).all()
-        return [self._contract(c) for c in rows]
+        # A several-seat contract is listed once, under its first reference.
+        first: dict[uuid.UUID, TenantOccupancy] = {}
+        for c in rows:
+            if c.group_id and (
+                c.group_id not in first or c.reference < first[c.group_id].reference
+            ):
+                first[c.group_id] = c
+        return [self._contract(c) for c in rows if not c.group_id or first[c.group_id] is c]
 
     def contract(self, contract_id: uuid.UUID) -> CustomerContract:
         tenant = self.tenant()
@@ -567,7 +648,26 @@ class CustomerService:
         else:
             label = TYPE_LABEL.get(SpaceType(space.space_type))
             scope = f"{label}: {space.name}" if label else space.name
+        members = group_members(self.session, c)
+        names: list[str] = []
+        rent = c.monthly_rent
+        if len(members) > 1:
+            spaces_by_id = {
+                s.id: s
+                for s in self.session.scalars(
+                    select(Space).where(Space.id.in_({m.space_id for m in members if m.space_id}))
+                )
+            }
+            names = [spaces_by_id[m.space_id].name for m in members if m.space_id in spaces_by_id]
+            scope = f"{len(names)} spaces: {', '.join(names)}"
+            rents = [m.monthly_rent for m in members]
+            rent = sum(rents) if all(r is not None for r in rents) else None  # type: ignore[assignment,misc]
+            c = members[0]
+        elif space is not None:
+            names = [space.name]
         return CustomerContract(
+            group_id=c.group_id,
+            spaces=names,
             id=c.id,
             reference=c.reference,
             property_id=c.property_id,
@@ -578,7 +678,7 @@ class CustomerService:
             start_date=c.start_date,
             end_date=c.end_date,
             status=effective_status(c, business_today()),
-            monthly_rent=float(c.monthly_rent) if c.monthly_rent is not None else None,
+            monthly_rent=float(rent) if rent is not None else None,
             security_deposit=float(c.security_deposit) if c.security_deposit is not None else None,
             currency=c.currency,
             terms=c.terms,
@@ -593,6 +693,7 @@ _ACTIONS = {
     "rescheduled": "was moved to a new time",
     "completed": "was completed",
     "cancelled": "was cancelled",
+    "converted": "was turned into a contract request",
     "requested": "was requested and is waiting for the property team",
     "activated": "started",
     "extended": "was extended",
@@ -624,42 +725,40 @@ def _add_months(start: date, months: int) -> date:
     return date.fromordinal(date(year, month, day).toordinal() - 1)
 
 
-def otp_sign_in(
-    session: Session,
-    gateway: SupabaseAuthGateway,
-    verifier: TokenVerifier,
-    *,
-    email: str,
-    code: str,
-    full_name: str | None,
-):  # type: ignore[no-untyped-def]
-    """Sign a customer in with the code emailed to them. A first sign-in creates their
-    customer account and tenant record; an administrator account is refused here."""
-    email = email.strip().lower()
-    supabase_session = gateway.verify_otp(email, code)
+def normalize_phone(raw: str) -> str:
+    """E.164 for a mobile number. Indian numbers may be given as 10 digits, with 0 or 91,
+    or with +91; other countries need their + code. Raises BadRequestError otherwise."""
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    plus = raw.strip().startswith("+")
+    if not plus:
+        if len(digits) == 11 and digits.startswith("0"):
+            digits = digits[1:]
+        if len(digits) == 10:
+            digits = "91" + digits
+    if digits.startswith("91") and len(digits) == 12:
+        if digits[2] not in "6789":
+            raise BadRequestError("Enter a valid Indian mobile number.")
+        return "+" + digits
+    if plus and 8 <= len(digits) <= 15 and not digits.startswith("0"):
+        return "+" + digits
+    raise BadRequestError("Enter a valid mobile number, e.g. 98765 43210 or +91 98765 43210.")
+
+
+def _phone_claim(phone: str | None) -> str | None:
+    return ("+" + phone.lstrip("+")) if phone else None
+
+
+def finish_code_sign_in(
+    session: Session, verifier: TokenVerifier, supabase_session: SupabaseSession
+) -> OtpResult:
+    """After the provider verified a code: sign in a customer whose tenant is activated.
+    Nothing is created here (BR-005); anyone else is told how access works."""
     claims = verifier.verify(supabase_session.access_token)
     user = session.get(AppUser, claims.subject)
     if user is None:
-        name = (full_name or "").strip() or email.split("@")[0]
-        user = AppUser(id=claims.subject, email=email, full_name=name, role=UserRole.CUSTOMER)
-        session.add(user)
-        session.flush()
-        if session.scalar(select(Tenant.id).where(Tenant.user_id == user.id)) is None:
-            tenant = Tenant(name=name, email=email, user_id=user.id)
-            session.add(tenant)
-            session.flush()
-            log_activity(
-                session,
-                user,
-                action="registered",
-                entity_type="tenants",
-                entity_id=tenant.id,
-                property_id=None,
-                message=f'Customer "{name}" registered with an email code.',
-            )
-        commit(session)
-    elif user.role != UserRole.CUSTOMER:
+        raise ForbiddenError(NOT_ACTIVATED)
+    if user.role != UserRole.CUSTOMER:
         raise ForbiddenError(
             "This is the customer app. Administrators sign in to the SIGMANIX admin application."
         )
-    return open_session(session, verifier, supabase_session)
+    return OtpResult(status="SIGNED_IN", session=open_session(session, verifier, supabase_session))

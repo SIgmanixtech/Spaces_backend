@@ -809,3 +809,345 @@ def test_revision_0008_renders_as_sql_without_a_database(
     assert "CREATE TABLE billing_profiles" in upgrade
     assert "coalesce(building_id" in upgrade
     assert "INSERT INTO billing_profiles" not in upgrade and "UPDATE pricing_rules" not in upgrade
+
+
+def test_0009_is_additive_and_guards_its_downgrade(migrations: Config) -> None:
+    command.downgrade(migrations, "0008")
+    with get_engine().begin() as connection:
+        ids = floor_with_portion(connection)
+        connection.execute(
+            text(
+                "INSERT INTO app_users (id, email, role)"
+                " VALUES (gen_random_uuid(), 'a@x.io', 'ADMIN')"
+            )
+        )
+    command.upgrade(migrations, "0009")
+    with get_engine().begin() as connection:
+        # Existing rows are untouched: no type set, no details, every user keeps an email.
+        assert (
+            connection.execute(
+                text("SELECT count(*) FROM spaces WHERE contract_type IS NOT NULL")
+            ).scalar_one()
+            == 0
+        )
+        assert (
+            connection.execute(
+                text("SELECT count(*) FROM app_users WHERE email IS NULL")
+            ).scalar_one()
+            == 0
+        )
+        # A user needs an email or a phone; phones are unique.
+        with pytest.raises(DBAPIError), connection.begin_nested():
+            connection.execute(
+                text("INSERT INTO app_users (id, role) VALUES (gen_random_uuid(), 'CUSTOMER')")
+            )
+        connection.execute(
+            text(
+                "INSERT INTO app_users (id, phone, role)"
+                " VALUES (gen_random_uuid(), '+919876543210', 'CUSTOMER')"
+            )
+        )
+        with pytest.raises(DBAPIError), connection.begin_nested():
+            connection.execute(
+                text(
+                    "INSERT INTO app_users (id, phone, role)"
+                    " VALUES (gen_random_uuid(), '+919876543210', 'CUSTOMER')"
+                )
+            )
+        # Only the two contract types are accepted.
+        with pytest.raises(DBAPIError), connection.begin_nested():
+            connection.execute(
+                text("UPDATE spaces SET contract_type = 'RENTAL' WHERE id = :s"),
+                {"s": ids["5A"]},
+            )
+    with pytest.raises(DBAPIError, match="Cannot downgrade past 0009"):
+        command.downgrade(migrations, "0008")
+    assert current_revision() == "0009"
+    with get_engine().begin() as connection:
+        connection.execute(text("DELETE FROM app_users WHERE email IS NULL"))
+    command.downgrade(migrations, "0008")
+    assert current_revision() == "0008"
+    command.upgrade(migrations, "head")
+
+
+def test_revision_0009_renders_as_sql_without_a_database(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command.upgrade(alembic_config(), "0008:0009", sql=True)
+    upgrade = capsys.readouterr().out
+    assert "CREATE TABLE contract_templates" in upgrade
+    assert "CREATE TABLE contract_documents" in upgrade
+    # No data is written, apart from Alembic's own version marker.
+    statements = [line for line in upgrade.splitlines() if line.startswith(("INSERT", "UPDATE"))]
+    assert all("alembic_version" in line for line in statements)
+
+
+def test_0011_and_0012_are_additive_and_0012_seeds_the_expense_types(migrations: Config) -> None:
+    command.downgrade(migrations, "0010")
+    with get_engine().begin() as connection:
+        tables = set(
+            connection.execute(
+                text("SELECT table_name FROM information_schema.tables WHERE table_schema='public'")
+            ).scalars()
+        )
+        assert "reimbursement_expense_types" not in tables
+    command.upgrade(migrations, "0012")
+    with get_engine().begin() as connection:
+        names = (
+            connection.execute(text("SELECT name FROM reimbursement_expense_types ORDER BY name"))
+            .scalars()
+            .all()
+        )
+        assert names == [
+            "Diesel generator / power backup",
+            "Electricity",
+            "Internet",
+            "Other shared operational expenses",
+            "Waste management",
+            "Water",
+        ]
+        tenant_columns = set(
+            connection.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns"
+                    " WHERE table_name = 'tenants'"
+                )
+            ).scalars()
+        )
+        assert {"client_invited_at", "client_activated_at"} <= tenant_columns
+    command.downgrade(migrations, "0011")
+    with get_engine().begin() as connection:
+        assert (
+            connection.execute(
+                text("SELECT to_regclass('public.reimbursement_terms')")
+            ).scalar_one()
+            is None
+        )
+    command.upgrade(migrations, "head")
+
+
+def test_revision_0012_renders_as_sql_without_a_database(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command.upgrade(alembic_config(), "0011:0012", sql=True)
+    sql = capsys.readouterr().out
+    assert "CREATE TABLE reimbursement_expense_types" in sql
+    assert "Electricity" in sql
+
+
+def insert_0011_data(connection: Connection) -> None:
+    """A property, a price with a deposit and an additional charge, a tenant and a contract,
+    as revision 0011 stores them."""
+    property_id = connection.execute(
+        text(
+            "INSERT INTO properties (name, property_type, category, address, city, state,"
+            " postal_code) VALUES ('Fee Tower', 'COMMERCIAL', 'OFFICE', '2 New Road',"
+            " 'Hyderabad', 'Telangana', '500001') RETURNING id"
+        )
+    ).scalar_one()
+    connection.execute(
+        text(
+            "INSERT INTO pricing_rules (property_id, target_type, rate_basis, billing_period,"
+            " amount, effective_from, status, additional_charges, deposit_rule, deposit_value)"
+            " VALUES (:p, 'PROPERTY', 'PER_SQFT', 'MONTHLY', 70, '2026-01-01', 'ACTIVE',"
+            ' \'[{"label": "Electricity", "amount": 500}]\', \'MONTHS_OF_RENT\', 2)'
+        ),
+        {"p": property_id},
+    )
+    tenant_id = connection.execute(
+        text("INSERT INTO tenants (name) VALUES ('Acme Ltd') RETURNING id")
+    ).scalar_one()
+    connection.execute(
+        text(
+            "INSERT INTO tenant_occupancies (tenant_id, property_id, start_date, security_deposit)"
+            " VALUES (:t, :p, '2026-01-01', 50000)"
+        ),
+        {"t": tenant_id, "p": property_id},
+    )
+
+
+def snapshot_0011(connection: Connection) -> dict[str, list[dict]]:
+    return {
+        table: [
+            row[0]
+            for row in connection.execute(
+                text(f"SELECT to_jsonb(t) FROM {table} t ORDER BY t.id")  # noqa: S608
+            )
+        ]
+        for table in ("properties", "pricing_rules", "tenants", "tenant_occupancies")
+    }
+
+
+def test_0012_keeps_existing_rows_and_its_seed_is_never_duplicated(migrations: Config) -> None:
+    from sqlalchemy.orm import Session
+
+    from app.services.reimbursements import seed_expense_types
+
+    command.downgrade(migrations, "0011")
+    with get_engine().begin() as connection:
+        insert_0011_data(connection)
+        before = snapshot_0011(connection)
+    command.upgrade(migrations, "0012")
+    with get_engine().connect() as connection:
+        # Prices, their additional charges and deposits, and contracts are untouched.
+        assert snapshot_0011(connection) == before
+    # Re-running the test/e2e seed after the migration adds nothing.
+    with Session(get_engine()) as session:
+        assert seed_expense_types(session) == 0
+        assert seed_expense_types(session) == 0
+        session.commit()
+    with get_engine().connect() as connection:
+        assert connection.execute(
+            text("SELECT count(*), count(DISTINCT lower(name)) FROM reimbursement_expense_types")
+        ).one() == (6, 6)
+    # Nothing entered since, so the downgrade is allowed and loses nothing.
+    command.downgrade(migrations, "0011")
+    with get_engine().connect() as connection:
+        assert snapshot_0011(connection) == before
+
+
+def test_0012_downgrade_refuses_to_discard_reimbursement_data(migrations: Config) -> None:
+    from sqlalchemy.orm import Session
+
+    from app.services.reimbursements import seed_expense_types
+
+    # Start at 0012 itself, whatever revisions came after it.
+    command.downgrade(migrations, "0012")
+    dispose_engine()
+    # The fixture empties every table between tests, the seeded catalogue included.
+    with Session(get_engine()) as session:
+        seed_expense_types(session)
+        session.commit()
+    with get_engine().begin() as connection:
+        insert_0011_data(connection)
+        property_id = connection.execute(text("SELECT id FROM properties")).scalar_one()
+        electricity = connection.execute(
+            text("SELECT id FROM reimbursement_expense_types WHERE name = 'Electricity'")
+        ).scalar_one()
+        connection.execute(
+            text(
+                "INSERT INTO reimbursement_terms (property_id, expense_type_id, method, amount,"
+                " recurrence, billing_period) VALUES (:p, :x, 'FIXED', 1000, 'RECURRING',"
+                " 'MONTHLY')"
+            ),
+            {"p": property_id, "x": electricity},
+        )
+    with pytest.raises(DBAPIError, match="Cannot downgrade past 0012: 1 reimbursement term"):
+        command.downgrade(migrations, "0011")
+    dispose_engine()
+    assert current_revision() == "0012"
+    with get_engine().begin() as connection:
+        assert connection.execute(text("SELECT count(*) FROM reimbursement_terms")).scalar() == 1
+        connection.execute(text("DELETE FROM reimbursement_terms"))
+        # An expense type an admin added is kept too.
+        connection.execute(
+            text("INSERT INTO reimbursement_expense_types (name) VALUES ('Pest control')")
+        )
+    with pytest.raises(DBAPIError, match=r"0 expense\(s\) and 1 added or renamed"):
+        command.downgrade(migrations, "0011")
+    dispose_engine()
+    with get_engine().begin() as connection:
+        connection.execute(
+            text("DELETE FROM reimbursement_expense_types WHERE name = 'Pest control'")
+        )
+    command.downgrade(migrations, "0011")
+    assert current_revision() == "0011"
+
+
+def test_revision_0012_downgrade_renders_its_guard_as_sql(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command.downgrade(alembic_config(), "0012:0011", sql=True)
+    sql = capsys.readouterr().out
+    assert "Cannot downgrade past 0012" in sql
+    assert "DROP TABLE reimbursement_expense_types" in sql
+
+
+AMENITY_LEVEL_COLUMNS = {"building_id", "floor_id", "space_id"}
+
+
+def test_0013_keeps_property_amenities_and_its_downgrade_guards_placed_ones(
+    migrations: Config,
+) -> None:
+    command.downgrade(migrations, "0012")
+    dispose_engine()
+    with get_engine().begin() as connection:
+        insert_0011_data(connection)
+        property_id = connection.execute(text("SELECT id FROM properties")).scalar_one()
+        for name, status in (("Wi-Fi", "ACTIVE"), ("Parking", "INACTIVE")):
+            amenity = connection.execute(
+                text("INSERT INTO amenities (name) VALUES (:n) RETURNING id"), {"n": name}
+            ).scalar_one()
+            connection.execute(
+                text(
+                    "INSERT INTO property_amenities (property_id, amenity_id, status, notes,"
+                    " opening_time) VALUES (:p, :a, :s, 'kept', '09:00')"
+                ),
+                {"p": property_id, "a": amenity, "s": status},
+            )
+        before = [
+            row[0]
+            for row in connection.execute(
+                text("SELECT to_jsonb(t) FROM property_amenities t ORDER BY t.id")
+            )
+        ]
+    command.upgrade(migrations, "0013")
+    dispose_engine()
+    with get_engine().begin() as connection:
+        after = [
+            row[0]
+            for row in connection.execute(
+                text("SELECT to_jsonb(t) FROM property_amenities t ORDER BY t.id")
+            )
+        ]
+        # Every existing row is a property-level assignment, otherwise unchanged.
+        assert [{k: v for k, v in r.items() if k not in AMENITY_LEVEL_COLUMNS} for r in after] == (
+            before
+        )
+        assert all(r[k] is None for r in after for k in AMENITY_LEVEL_COLUMNS)
+        building = connection.execute(
+            text("INSERT INTO buildings (property_id, name) VALUES (:p, 'A') RETURNING id"),
+            {"p": property_id},
+        ).scalar_one()
+        wifi = connection.execute(text("SELECT id FROM amenities WHERE name = 'Wi-Fi'")).scalar()
+        # The same amenity may now also sit at a building of the property.
+        connection.execute(
+            text(
+                "INSERT INTO property_amenities (property_id, amenity_id, building_id)"
+                " VALUES (:p, :a, :b)"
+            ),
+            {"p": property_id, "a": wifi, "b": building},
+        )
+    with pytest.raises(DBAPIError, match="Cannot downgrade past 0013: 1 building, floor or space"):
+        command.downgrade(migrations, "0012")
+    dispose_engine()
+    assert current_revision() == "0013"
+    with get_engine().begin() as connection:
+        connection.execute(text("DELETE FROM property_amenities WHERE building_id IS NOT NULL"))
+    command.downgrade(migrations, "0012")
+    dispose_engine()
+    assert current_revision() == "0012"
+    with get_engine().connect() as connection:
+        assert [
+            row[0]
+            for row in connection.execute(
+                text("SELECT to_jsonb(t) FROM property_amenities t ORDER BY t.id")
+            )
+        ] == before
+        kind = connection.execute(
+            text("SELECT contype FROM pg_constraint WHERE conname = 'uq_property_amenities_pair'")
+        ).scalar_one()
+        assert kind == "u"  # the original (property, amenity) constraint is back
+
+
+def test_revision_0013_renders_as_sql_without_a_database(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command.upgrade(alembic_config(), "0012:0013", sql=True)
+    upgrade = capsys.readouterr().out
+    assert "ADD COLUMN building_id" in upgrade
+    assert "CREATE UNIQUE INDEX uq_property_amenities_floor" in upgrade
+    statements = [line for line in upgrade.splitlines() if line.startswith(("INSERT", "UPDATE"))]
+    assert all("alembic_version" in line for line in statements)
+    command.downgrade(alembic_config(), "0013:0012", sql=True)
+    assert "Cannot downgrade past 0013" in capsys.readouterr().out

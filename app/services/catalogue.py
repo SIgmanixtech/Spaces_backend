@@ -28,6 +28,7 @@ from app.core.errors import AppError, BadRequestError, NotFoundError
 from app.models.amenity import Amenity, PropertyAmenity
 from app.models.building import Building, Floor
 from app.models.enums import (
+    AmenityLevel,
     AmenityStatus,
     BillingPeriod,
     BookingStatus,
@@ -67,6 +68,7 @@ from app.schemas.common import ListQuery
 from app.schemas.layout import LayoutElement
 from app.schemas.pricing import EffectivePrice
 from app.services.allocations import AllocationEngine, booking_period
+from app.services.amenities import LEVEL_WHERE, offered_anywhere
 from app.services.base import page_of
 from app.services.files import FileService
 from app.services.pricing import PricingService, is_priceable, periods_in
@@ -165,12 +167,14 @@ class CatalogueService:
         if property_type:
             statement = statement.where(Property.property_type == property_type.upper())
         if amenity:
+            # Offered anywhere in the property: at the property, or one of its buildings,
+            # floors or (unarchived) spaces (BR-031). One EXISTS: no duplicates, no N+1.
             statement = statement.where(
                 select(PropertyAmenity.id)
                 .join(Amenity, Amenity.id == PropertyAmenity.amenity_id)
                 .where(
                     PropertyAmenity.property_id == Property.id,
-                    PropertyAmenity.status == AmenityStatus.ACTIVE,
+                    offered_anywhere(),
                     text_search([Amenity.name], amenity),
                 )
                 .exists()
@@ -215,6 +219,7 @@ class CatalogueService:
             .where(
                 PropertyAmenity.property_id.in_(ids),
                 PropertyAmenity.status == AmenityStatus.ACTIVE,
+                LEVEL_WHERE[AmenityLevel.PROPERTY],  # cards list property-level amenities
             )
             .order_by(Amenity.name)
         ):

@@ -5,15 +5,21 @@ and any id that is not the customer's own answers 404.
 """
 
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
 from app.api.dependencies import CurrentCustomer, DbSession, ListParams, get_token_verifier
 from app.api.responses import NOT_FOUND, PROTECTED, VALIDATION_ERROR, _error
-from app.api.v1.endpoints.files import StorageFactory
+from app.api.v1.endpoints.agreements import agreement_read
+from app.api.v1.endpoints.files import Storage, StorageFactory
+from app.core.errors import ForbiddenError, NotFoundError
 from app.core.security import TokenVerifier
+from app.models.agreement import ContractDocument
 from app.models.enums import BookingStatus
+from app.models.user import AppUser
+from app.schemas.agreement import AgreementDetails, AgreementRead, DocumentRead, LinkRead
 from app.schemas.auth import SessionRead
 from app.schemas.client import (
     ContractFromBooking,
@@ -23,52 +29,38 @@ from app.schemas.client import (
     CustomerBookingReschedule,
     CustomerContract,
     CustomerDashboard,
+    CustomerGroupBookingCreate,
     CustomerProfile,
     CustomerProfileUpdate,
-    CustomerRegister,
     OtpRequest,
+    OtpResult,
     OtpVerify,
     PasswordRecovery,
-    RegistrationResult,
+    PhoneOtpRequest,
+    PhoneOtpVerify,
+    SetPassword,
 )
 from app.schemas.common import Page
-from app.services.auth import SupabaseAuthGateway, get_auth_gateway
+from app.services.agreements import AgreementService
+from app.services.auth import (
+    SupabaseAuthGateway,
+    SupabaseSession,
+    get_auth_gateway,
+    open_session,
+)
 from app.services.catalogue import CatalogueService
-from app.services.customers import CustomerService, otp_sign_in, register
+from app.services.client_access import NOT_ACTIVATED, ClientAccessService
+from app.services.customers import (
+    CustomerService,
+    finish_code_sign_in,
+    normalize_phone,
+)
 
-router = APIRouter(prefix="/customer", tags=["Customer"])
+# Mounted at /client (and at the older /customer) by the v1 router.
+router = APIRouter(tags=["Client: customer"])
 Gateway = Annotated[SupabaseAuthGateway, Depends(get_auth_gateway)]
 Verifier = Annotated[TokenVerifier, Depends(get_token_verifier)]
 HELD = {409: _error("The space is not free for that time, or has no price for that period.")}
-
-
-@router.post(
-    "/register",
-    response_model=RegistrationResult,
-    status_code=201,
-    responses={
-        **VALIDATION_ERROR,
-        409: _error("An account with this email already exists."),
-        503: _error("The authentication service is unavailable."),
-    },
-    summary="Create a customer account",
-)
-def register_customer(
-    body: CustomerRegister, session: DbSession, gateway: Gateway, verifier: Verifier
-) -> RegistrationResult:
-    """Public. Creates the sign-in (Supabase Auth), a CUSTOMER account and the tenant
-    record it owns. Signed in at once, or after confirming the email, depending on the
-    authentication provider's settings. Sign in later with /auth/login."""
-    return register(
-        session,
-        gateway,
-        verifier,
-        email=str(body.email),
-        password=body.password.get_secret_value(),
-        full_name=body.full_name,
-        phone=body.phone,
-        company_name=body.company_name,
-    )
 
 
 @router.post(
@@ -82,16 +74,35 @@ def password_recovery(body: PasswordRecovery, gateway: Gateway) -> dict[str, str
 
 
 @router.post(
-    "/resend-confirmation",
-    status_code=202,
-    responses=VALIDATION_ERROR,
-    summary="Resend the confirmation email",
+    "/auth/set-password",
+    response_model=SessionRead,
+    responses={
+        **VALIDATION_ERROR,
+        401: _error("The link has expired or was already used."),
+        403: _error("Not an invited tenant."),
+    },
+    summary="Set a password from an invitation or reset link",
 )
-def resend_confirmation(body: PasswordRecovery, gateway: Gateway) -> dict[str, str]:
-    """Public. Sends the sign-up confirmation link again if the address has an unconfirmed
-    account; the answer is the same either way."""
-    gateway.resend_confirmation(str(body.email))
-    return {"message": "If that address is waiting for confirmation, a new link is on its way."}
+def set_password(
+    body: SetPassword, session: DbSession, gateway: Gateway, verifier: Verifier
+) -> SessionRead:
+    """Public (the link's token is the proof). Only a tenant the property team invited can
+    set a password here; the first time activates their client access. Returns a session."""
+    claims = verifier.verify(body.access_token)
+    user = session.get(AppUser, claims.subject)
+    if user is None:
+        raise ForbiddenError(NOT_ACTIVATED)
+    ClientAccessService(session, None, gateway).activate(
+        user, body.access_token, body.password.get_secret_value()
+    )
+    expires_in = (
+        max(0, int(claims.expires_at - datetime.now(UTC).timestamp()))
+        if claims.expires_at
+        else 3600
+    )
+    return open_session(
+        session, verifier, SupabaseSession(body.access_token, body.refresh_token, expires_in)
+    )
 
 
 @router.get("/me", response_model=CustomerProfile, responses=PROTECTED, summary="My profile")
@@ -137,6 +148,31 @@ def book(
     return CustomerService(session, user).book(
         CatalogueService(session, storage),
         space_id=body.space_id,
+        billing_period=body.billing_period,
+        start_at=body.start_at,
+        end_at=body.end_at,
+        notes=body.notes,
+    )
+
+
+@router.post(
+    "/bookings/group",
+    response_model=list[CustomerBooking],
+    status_code=201,
+    responses={**PROTECTED, **NOT_FOUND, **HELD},
+    summary="Book several spaces (e.g. 5 seats) for the same time",
+)
+def book_group(
+    user: CurrentCustomer,
+    session: DbSession,
+    storage: StorageFactory,
+    body: CustomerGroupBookingCreate,
+) -> list[CustomerBooking]:
+    """All of them are booked, or none is (409 names the space that is not free). They
+    share a group id; requesting a contract for one of them covers all of them."""
+    return CustomerService(session, user).book_group(
+        CatalogueService(session, storage),
+        space_ids=body.space_ids,
         billing_period=body.billing_period,
         start_at=body.start_at,
         end_at=body.end_at,
@@ -200,27 +236,57 @@ def cancel_booking(
 def request_otp(body: OtpRequest, gateway: Gateway) -> dict[str, str]:
     """Public. Emails a 6-digit sign-in code. A new address gets an account on first sign-in."""
     gateway.send_otp(str(body.email).strip().lower())
+    if getattr(gateway, "test_mode", False):
+        return {
+            "message": "Test mode: no code is sent. Enter the test code you were given.",
+            "test_mode": "true",
+        }
     return {"message": "A sign-in code is on its way. It is valid for a few minutes."}
 
 
 @router.post(
     "/otp/verify",
-    response_model=SessionRead,
+    response_model=OtpResult,
     responses={**VALIDATION_ERROR, 401: _error("The code is wrong or has expired.")},
-    summary="Sign in with the emailed code",
+    summary="Check an emailed sign-in code",
 )
 def verify_otp(
     body: OtpVerify, session: DbSession, gateway: Gateway, verifier: Verifier
-) -> SessionRead:
-    """Public. Returns a session for the customer; creates their account on first sign-in."""
-    return otp_sign_in(
-        session,
-        gateway,
-        verifier,
-        email=str(body.email),
-        code=body.code,
-        full_name=body.full_name,
-    )
+) -> OtpResult:
+    """Public. SIGNED_IN with a session, or REGISTRATION_REQUIRED for a new customer, who
+    then completes /customer/onboarding."""
+    supabase_session = gateway.verify_otp(str(body.email).strip().lower(), body.code)
+    return finish_code_sign_in(session, verifier, supabase_session)
+
+
+@router.post(
+    "/phone-otp/request",
+    status_code=202,
+    responses={**VALIDATION_ERROR, 503: _error("SMS sign-in is not configured.")},
+    summary="Text a sign-in code to a mobile number",
+)
+def request_phone_otp(body: PhoneOtpRequest, gateway: Gateway) -> dict[str, str]:
+    """Public. The answer is the same whether or not the number has an account."""
+    gateway.send_phone_otp(normalize_phone(body.phone))
+    if getattr(gateway, "test_mode", False):
+        return {
+            "message": "Test mode: no code is sent. Enter the test code you were given.",
+            "test_mode": "true",
+        }
+    return {"message": "A sign-in code is on its way by SMS. It is valid for a few minutes."}
+
+
+@router.post(
+    "/phone-otp/verify",
+    response_model=OtpResult,
+    responses={**VALIDATION_ERROR, 401: _error("The code is wrong or has expired.")},
+    summary="Check a texted sign-in code",
+)
+def verify_phone_otp(
+    body: PhoneOtpVerify, session: DbSession, gateway: Gateway, verifier: Verifier
+) -> OtpResult:
+    supabase_session = gateway.verify_phone_otp(normalize_phone(body.phone), body.code)
+    return finish_code_sign_in(session, verifier, supabase_session)
 
 
 @router.post(
@@ -250,6 +316,68 @@ def withdraw_contract(
     user: CurrentCustomer, session: DbSession, contract_id: uuid.UUID
 ) -> CustomerContract:
     return CustomerService(session, user).withdraw_contract(contract_id)
+
+
+@router.get(
+    "/contracts/{contract_id}/agreement",
+    response_model=AgreementRead,
+    responses={**PROTECTED, **NOT_FOUND},
+    summary="My contract's agreement: what is needed and its documents",
+)
+def my_agreement(
+    user: CurrentCustomer, session: DbSession, contract_id: uuid.UUID
+) -> AgreementRead:
+    contract = CustomerService(session, user).own_contract(contract_id)
+    return agreement_read(AgreementService(session, user), contract)
+
+
+@router.put(
+    "/contracts/{contract_id}/agreement/details",
+    response_model=AgreementRead,
+    responses={**PROTECTED, **NOT_FOUND, **VALIDATION_ERROR},
+    summary="Save the details my agreement needs",
+)
+def save_agreement_details(
+    user: CurrentCustomer, session: DbSession, contract_id: uuid.UUID, body: AgreementDetails
+) -> AgreementRead:
+    """Only customer fields are accepted; prices, dates, type and template are not."""
+    contract = CustomerService(session, user).own_contract(contract_id)
+    service = AgreementService(session, user)
+    service.save_details(contract, body.values)
+    return agreement_read(service, contract)
+
+
+@router.post(
+    "/contracts/{contract_id}/agreement/documents",
+    response_model=DocumentRead,
+    status_code=201,
+    responses={**PROTECTED, **NOT_FOUND, 409: _error("Not ready to generate; says why.")},
+    summary="Generate my agreement document",
+)
+def generate_my_agreement(
+    user: CurrentCustomer, session: DbSession, storage: Storage, contract_id: uuid.UUID
+) -> DocumentRead:
+    contract = CustomerService(session, user).own_contract(contract_id)
+    return DocumentRead.model_validate(AgreementService(session, user, storage).generate(contract))
+
+
+@router.get(
+    "/contract-documents/{document_id}/download",
+    response_model=LinkRead,
+    responses={**PROTECTED, **NOT_FOUND},
+    summary="A short-lived link to one of my agreement documents",
+)
+def download_my_agreement(
+    user: CurrentCustomer, session: DbSession, storage: Storage, document_id: uuid.UUID
+) -> LinkRead:
+    document = session.get(ContractDocument, document_id)
+    if document is None:
+        raise NotFoundError("Document not found.")
+    # Raises 404 unless the document's contract is this customer's.
+    CustomerService(session, user).own_contract(document.contract_id)
+    return LinkRead(
+        url=AgreementService(session, user, storage).document_link(document), expires_in=300
+    )
 
 
 @router.get(

@@ -9,7 +9,8 @@ from app.schemas.common import InputSchema, ReadSchema
 
 class CurrentUserRead(ReadSchema):
     id: uuid.UUID
-    email: str
+    email: str | None
+    phone: str | None = None
     full_name: str | None
     role: UserRole
 

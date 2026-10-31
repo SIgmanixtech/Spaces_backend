@@ -7,7 +7,14 @@ from app.api.dependencies import CurrentAdmin, DbSession, ListParams
 from app.api.responses import CONFLICT, NOT_FOUND, PROTECTED
 from app.models.enums import SpaceOperationalStatus, SpaceType
 from app.schemas.common import Page, RemovalRead
-from app.schemas.space import SpaceCreate, SpaceMove, SpaceRead, SpaceUpdate
+from app.schemas.space import (
+    SpaceCreate,
+    SpaceMove,
+    SpaceRead,
+    SpaceUpdate,
+    WorkstationCreate,
+    WorkstationRead,
+)
 from app.services.spaces import SpaceService
 
 router = APIRouter(prefix="/spaces", tags=["Spaces"], responses=PROTECTED)
@@ -79,6 +86,26 @@ def create_space(admin: CurrentAdmin, session: DbSession, body: SpaceCreate) -> 
     Returns `409` for a second whole-floor space on a floor."""
     service = SpaceService(session, admin)
     return service.to_read([service.create(body.model_dump())])[0]
+
+
+@router.post(
+    "/workstations",
+    response_model=WorkstationRead,
+    status_code=201,
+    responses={**NOT_FOUND, **CONFLICT},
+    summary="Create a workstation with N chairs",
+)
+def create_workstation(
+    admin: CurrentAdmin, session: DbSession, body: WorkstationCreate
+) -> WorkstationRead:
+    """One rentable workstation and N chairs inside it ("WS1-Chair 1"...), each a real,
+    non-rentable seat. Booking the workstation holds its chairs; a chair is never booked
+    on its own. All created together, or nothing. 409 if a workstation of that name exists."""
+    service = SpaceService(session, admin)
+    workstation, chairs = service.create_workstation(body.model_dump())
+    return WorkstationRead(
+        workstation=service.to_read([workstation])[0], chairs=service.to_read(chairs)
+    )
 
 
 @router.get("/{space_id}", response_model=SpaceRead, responses=NOT_FOUND, summary="Get a space")

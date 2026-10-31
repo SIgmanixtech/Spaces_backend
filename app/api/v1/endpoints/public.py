@@ -9,7 +9,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Query
 
-from app.api.dependencies import DbSession, ListParams
+from app.api.dependencies import AppSettings, DbSession, ListParams, OptionalCustomer
 from app.api.responses import NOT_FOUND, VALIDATION_ERROR, _error
 from app.api.v1.endpoints.files import StorageFactory
 from app.models.enums import BillingPeriod, SpaceType
@@ -20,12 +20,16 @@ from app.schemas.client import (
     PublicFloorPlan,
     PublicPropertyCard,
     PublicPropertyDetail,
+    PublicSpaceAmenities,
     QuoteRead,
     QuoteRequest,
     SpaceAvailability,
 )
 from app.schemas.common import Page
+from app.schemas.search import SearchRequest, SearchResponse
+from app.services.amenities import AmenityService
 from app.services.catalogue import CatalogueService
+from app.services.search import SpaceSearch, customer_context
 
 router = APIRouter(prefix="/public", tags=["Public catalogue"], responses=VALIDATION_ERROR)
 BAD_RANGE = {400: _error("The times are missing a time zone, out of order or too far apart.")}
@@ -36,7 +40,7 @@ def capabilities() -> Capabilities:
     """Features the backend offers customers. Invoices, online payment and QR access are
     not implemented, and the client app shows them as unavailable."""
     return Capabilities(
-        customer_registration=True,
+        customer_registration=False,
         password_recovery=True,
         bookings=True,
         contracts=True,
@@ -122,6 +126,33 @@ def floor_availability(
     return CatalogueService(session).floor_availability(property_id, floor_id, start_at, end_at)
 
 
+@router.post(
+    "/space-search",
+    response_model=SearchResponse,
+    responses=VALIDATION_ERROR,
+    summary="Search spaces with a sentence",
+)
+def space_search(
+    body: SearchRequest,
+    session: DbSession,
+    settings: AppSettings,
+    storage: StorageFactory,
+    customer: OptionalCustomer,
+) -> SearchResponse:
+    """Public. The sentence is read into filters (Claude when an API key is configured, in
+    the context of the previous search and, for a signed-in customer, their own recent
+    bookings; otherwise the built-in reader). The results are real listed spaces with
+    approved prices, and availability is checked by the allocation engine when a date is
+    given. Searching reserves nothing."""
+    return SpaceSearch(session, settings, storage).search(
+        body.query,
+        body.page,
+        body.page_size,
+        previous=(body.previous.query, body.previous.intent) if body.previous else None,
+        customer=customer_context(session, customer) if customer else None,
+    )
+
+
 @router.get(
     "/free-spaces",
     response_model=FreeSpaces,
@@ -159,6 +190,42 @@ def space_availability(
     session: DbSession, space_id: uuid.UUID, start_at: datetime, end_at: datetime
 ) -> SpaceAvailability:
     return CatalogueService(session).space_availability(space_id, start_at, end_at)
+
+
+@router.get(
+    "/spaces/{space_id}/amenities",
+    response_model=PublicSpaceAmenities,
+    responses=NOT_FOUND,
+    summary="Amenities available at a space",
+)
+def space_amenities(session: DbSession, space_id: uuid.UUID) -> PublicSpaceAmenities:
+    """Read-only. The space's own active amenities plus those of its parent spaces, floor,
+    building and property, each once with where it comes from. Spaces of published
+    properties only."""
+    space, prop = CatalogueService(session).get_space(space_id)
+    found = AmenityService(session).effective(space_id=space.id)
+    return PublicSpaceAmenities(
+        space_id=space.id,
+        space_name=space.name,
+        property_id=prop.id,
+        amenities=[
+            {
+                "name": a.name,
+                "description": a.description,
+                "is_direct": a.is_direct,
+                "sources": [
+                    {
+                        "level": src.level,
+                        "place_name": src.place_name,
+                        "opening_time": src.opening_time,
+                        "closing_time": src.closing_time,
+                    }
+                    for src in a.sources
+                ],
+            }
+            for a in found.amenities
+        ],
+    )
 
 
 @router.post(

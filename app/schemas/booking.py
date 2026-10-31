@@ -67,10 +67,19 @@ class BookingRead(ReadSchema):
     customer_phone: str | None
     start_at: datetime
     end_at: datetime
-    status: BookingStatus
+    status: BookingStatus | Literal["CONVERTED"] = Field(
+        description="CONVERTED: turned into a contract request (stored as cancelled)."
+    )
     notes: str | None
     cancelled_at: datetime | None
     cancellation_reason: str | None
+    contract_id: uuid.UUID | None = Field(
+        default=None, description="For a CONVERTED booking, the contract it was turned into."
+    )
+    contract_reference: str | None = None
+    group_id: uuid.UUID | None = Field(
+        default=None, description="Shared by bookings the customer made together."
+    )
     channel: str = Field(
         default="ADMIN", description="ADMIN for the admin portal, CUSTOMER for the customer app."
     )

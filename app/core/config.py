@@ -55,6 +55,15 @@ class Settings(BaseSettings):
     supabase_jwt_secret: SecretStr | None = None
 
     cors_allowed_origins: Annotated[list[str], NoDecode] = []
+    # The customer app's address. Links in Supabase emails (confirm sign-up, reset
+    # password) send people back here; it must also be in Supabase's Redirect URLs.
+    customer_app_url: AnyHttpUrl | None = None
+    # Natural-language space search: Claude reads each search in context when
+    # ANTHROPIC_API_KEY is set; without a key (or with this false) the built-in parser does.
+    search_ai_enabled: bool = True
+    anthropic_api_key: SecretStr | None = None
+    search_ai_model: str = "claude-opus-5-5"
+    search_ai_timeout_seconds: float = 10.0
 
     # Calendar dates (occupancy start/end, "today") are interpreted in this zone.
     # Timestamps are always stored and returned in UTC.

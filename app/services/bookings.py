@@ -48,6 +48,7 @@ from app.models.enums import (
     BookingStatus,
     PropertyStatus,
     SpaceOperationalStatus,
+    SpaceType,
 )
 from app.models.property import Property
 from app.models.space import Space
@@ -207,6 +208,12 @@ class BookingService:
             raise ConflictError("The property is not open for bookings.")
         if space.operational_status != SpaceOperationalStatus.ACTIVE:
             raise ConflictError("The space is not open for bookings.")
+        # Same rule as contracts: a whole floor is booked through its root, whatever its
+        # flag; anything else must be rentable (a workstation's chair, a corridor... never).
+        if space.space_type != SpaceType.FLOOR and (
+            not space.is_rentable or space.space_type == SpaceType.NON_RENTABLE
+        ):
+            raise ConflictError("The space is not rentable, so it cannot be booked.")
         if values.get("tenant_id") is not None:
             require(self.session, Tenant, values["tenant_id"], "Tenant")
         self._check_window(values["start_at"], values["end_at"])
@@ -301,14 +308,18 @@ class BookingService:
             raise ConflictError("A booking cannot be completed before it starts.")
         return self._finish("completed", booking)
 
-    def cancel(self, booking_id: uuid.UUID, reason: str | None = None) -> BookingRead:
+    def cancel(
+        self, booking_id: uuid.UUID, reason: str | None = None, *, action: str = "cancelled"
+    ) -> BookingRead:
+        """Frees the booking's time. action "converted" records that it became a contract
+        request; the booking then reads as CONVERTED (see converted_to)."""
         booking = self._transition(booking_id, BookingStatus.CANCELLED)
         booking.cancelled_at = datetime.now(UTC)
         booking.cancellation_reason = reason
         allocation = self.engine.for_booking(booking.id)
         if allocation is not None:
             self.engine.release(allocation, "BOOKING_CANCELLED")
-        return self._finish("cancelled", booking)
+        return self._finish(action, booking)
 
     # --- helpers ---------------------------------------------------------
 
@@ -557,6 +568,7 @@ class BookingService:
         properties = names(Property, {b.property_id for b in bookings})
         spaces = names(Space, {b.space_id for b in bookings})
         tenants = names(Tenant, {b.tenant_id for b in bookings if b.tenant_id})
+        contracts = converted_to(self.session, bookings)
         return [
             BookingRead.model_validate(
                 {
@@ -567,7 +579,34 @@ class BookingService:
                     "property_name": properties[booking.property_id],
                     "space_name": spaces[booking.space_id],
                     "tenant_name": tenants.get(booking.tenant_id),
+                    **converted_fields(booking, contracts),
                 }
             )
             for booking in bookings
         ]
+
+
+def converted_to(
+    session: Session, bookings: Sequence[Booking]
+) -> dict[uuid.UUID, tuple[uuid.UUID, str]]:
+    """The contract each cancelled booking was turned into, by booking id."""
+    ids = {b.id for b in bookings if b.status == BookingStatus.CANCELLED}
+    if not ids:
+        return {}
+    rows = session.execute(
+        select(TenantOccupancy.booking_id, TenantOccupancy.id, TenantOccupancy.reference).where(
+            TenantOccupancy.booking_id.in_(ids)
+        )
+    ).all()
+    return {booking_id: (contract_id, reference) for booking_id, contract_id, reference in rows}
+
+
+def converted_fields(
+    booking: Booking, contracts: dict[uuid.UUID, tuple[uuid.UUID, str]]
+) -> dict[str, Any]:
+    """A booking turned into a contract reads as CONVERTED, with that contract. It is stored
+    as cancelled, because it no longer holds its time: the contract holds the space instead."""
+    contract = contracts.get(booking.id)
+    if contract is None:
+        return {"contract_id": None, "contract_reference": None}
+    return {"status": "CONVERTED", "contract_id": contract[0], "contract_reference": contract[1]}

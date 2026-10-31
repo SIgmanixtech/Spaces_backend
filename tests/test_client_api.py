@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from app.main import app
 from app.models import AppUser, Booking, Tenant
 from app.models.enums import UserRole
-from app.services.auth import SignUp, SupabaseSession, get_auth_gateway
+from app.services.auth import get_auth_gateway
 from tests.conftest import make_token
 from tests.test_properties import create_property
 from tests.test_resources import V1, post
@@ -107,7 +107,17 @@ def customer_client(db_session: Session, key: ec.EllipticCurvePrivateKey, email:
     )
     db_session.add(user)
     db_session.flush()
-    db_session.add(Tenant(name=user.full_name, email=email, user_id=user.id))
+    now = datetime.now(UTC)
+    # An invited tenant who has set a password: the only kind that may use the client app.
+    db_session.add(
+        Tenant(
+            name=user.full_name,
+            email=email,
+            user_id=user.id,
+            client_invited_at=now,
+            client_activated_at=now,
+        )
+    )
     db_session.commit()
     return TestClient(app, headers={"Authorization": f"Bearer {make_token(key, user.id)}"})
 
@@ -276,61 +286,58 @@ def test_a_seat_booking_holds_only_that_seat(priya: TestClient, hub: dict) -> No
 
 
 class FakeGateway:
-    def __init__(self, key: ec.EllipticCurvePrivateKey, user_id: uuid.UUID, existing=False):
-        self.key, self.user_id, self.existing, self.recovered = key, user_id, existing, []
-
-    def sign_up(self, email: str, password: str, full_name: str) -> SignUp:
-        if self.existing:
-            return SignUp(user_id=None, session=None, existing=True)
-        token = make_token(self.key, self.user_id, email=email)
-        return SignUp(str(self.user_id), SupabaseSession(token, "refresh", 3600), False)
+    def __init__(self) -> None:
+        self.recovered: list[str] = []
 
     def recover(self, email: str) -> None:
         self.recovered.append(email)
 
 
-def test_registration_creates_a_customer_and_their_tenant_only(
-    verifier: None, db_session: Session, signing_key
-) -> None:
-    user_id = uuid.uuid4()
-    gateway = FakeGateway(signing_key, user_id)
+def test_public_registration_is_closed(verifier: None) -> None:
+    gateway = FakeGateway()
     app.dependency_overrides[get_auth_gateway] = lambda: gateway
     try:
         client = TestClient(app)
-        body = {
-            "email": "New@Example.com",
-            "password": "long-enough",
-            "full_name": "Meera",
-            "phone": "+91 90000 00000",
-        }
-        created = client.post(f"{CUSTOMER}/register", json=body)
-        assert created.status_code == 201, created.text
-        assert created.json()["status"] == "SIGNED_IN"
-        assert created.json()["session"]["user"]["role"] == "CUSTOMER"
-        tenant = db_session.scalar(select(Tenant).where(Tenant.user_id == user_id))
-        assert (tenant.name, tenant.email, tenant.phone) == (
-            "Meera",
-            "new@example.com",
-            "+91 90000 00000",
-        )
-        again = client.post(f"{CUSTOMER}/register", json=body)
-        assert again.status_code == 409
-        gateway.existing = True
-        assert (
-            client.post(f"{CUSTOMER}/register", json={**body, "email": "x@example.com"}).status_code
-            == 409
-        )
-        assert (
-            client.post(f"{CUSTOMER}/register", json={**body, "role": "ADMIN"}).status_code == 422
-        )
-        assert (
-            client.post(
-                f"{CUSTOMER}/password-recovery", json={"email": "a@example.com"}
-            ).status_code
-            == 202
-        )
+        body = {"email": "new@example.com", "password": "long-enough", "full_name": "Meera"}
+        for base in (f"{V1}/client", f"{V1}/customer"):
+            for path in ("register", "onboarding", "resend-confirmation"):
+                assert client.post(f"{base}/{path}", json=body).status_code == 404, path
+        caps = client.get(f"{PUBLIC}/capabilities").json()
+        assert caps["customer_registration"] is False
+        # Password reset still works for existing accounts (same answer for any address).
+        reset = client.post(f"{CUSTOMER}/password-recovery", json={"email": "a@example.com"})
+        assert reset.status_code == 202 and gateway.recovered == ["a@example.com"]
     finally:
         app.dependency_overrides.pop(get_auth_gateway, None)
+
+
+def test_customers_without_an_activated_tenant_cannot_use_the_client_app(
+    verifier: None, db_session: Session, signing_key, hub: dict
+) -> None:
+    def client_for(tenant: dict | None) -> TestClient:
+        user = AppUser(
+            id=uuid.uuid4(), email=f"{uuid.uuid4().hex}@example.com", role=UserRole.CUSTOMER
+        )
+        db_session.add(user)
+        db_session.flush()
+        if tenant is not None:
+            db_session.add(Tenant(name="T", email=user.email, user_id=user.id, **tenant))
+        db_session.commit()
+        return TestClient(
+            app, headers={"Authorization": f"Bearer {make_token(signing_key, user.id)}"}
+        )
+
+    now = datetime.now(UTC)
+    for state in (None, {}, {"client_invited_at": now}):
+        client = client_for(state)
+        assert client.get(f"{CUSTOMER}/me").status_code == 403
+        # No booking, and no tenant made for them by trying.
+        book(client, hub["seat1"], expected=403)
+    assert db_session.scalar(select(func.count()).select_from(Tenant)) == 2
+    inactive = client_for(
+        {"client_invited_at": now, "client_activated_at": now, "status": "INACTIVE"}
+    )
+    assert inactive.get(f"{CUSTOMER}/me").status_code == 403
 
 
 def test_admin_and_customer_permissions_do_not_overlap(api: TestClient, priya: TestClient) -> None:
@@ -813,7 +820,10 @@ def test_a_reservation_becomes_a_contract_request_that_holds_the_space(
         else contract["end_date"],
     )
     # The reservation was replaced by the request.
-    assert priya.get(f"{CUSTOMER}/bookings/{mine['id']}").json()["status"] == "CANCELLED"
+    converted = priya.get(f"{CUSTOMER}/bookings/{mine['id']}")
+    assert converted.status_code == 200, converted.text
+    assert converted.json()["status"] == "CONVERTED"
+    assert converted.json()["contract_reference"] == contract["reference"]
     assert priya.get(f"{CUSTOMER}/dashboard").json()["contract_requests"] == 1
 
     # While it waits, no one else sees or takes Seat 1 for those dates.
@@ -881,69 +891,3 @@ def test_contract_terms_end_the_day_before_the_same_date() -> None:
 
 
 # --- email code sign-in --------------------------------------------------------------------
-
-
-class OtpGateway:
-    def __init__(self, key: ec.EllipticCurvePrivateKey) -> None:
-        self.key, self.sent, self.users = key, [], {}
-
-    def send_otp(self, email: str) -> None:
-        self.sent.append(email)
-        self.users.setdefault(email, uuid.uuid4())
-
-    def verify_otp(self, email: str, code: str) -> SupabaseSession:
-        from app.core.errors import UnauthorizedError
-
-        if code != "123456" or email not in self.users:
-            raise UnauthorizedError("That code is wrong or has expired. Ask for a new one.")
-        token = make_token(self.key, self.users[email], email=email)
-        return SupabaseSession(token, "refresh", 3600)
-
-
-def test_customers_sign_in_with_an_emailed_code(
-    verifier: None, db_session: Session, signing_key
-) -> None:
-    gateway = OtpGateway(signing_key)
-    app.dependency_overrides[get_auth_gateway] = lambda: gateway
-    try:
-        client = TestClient(app)
-        assert (
-            client.post(f"{CUSTOMER}/otp/request", json={"email": "New@Example.com"}).status_code
-            == 202
-        )
-        assert gateway.sent == ["new@example.com"]
-        wrong = client.post(
-            f"{CUSTOMER}/otp/verify", json={"email": "new@example.com", "code": "000000"}
-        )
-        assert wrong.status_code == 401
-        first = client.post(
-            f"{CUSTOMER}/otp/verify",
-            json={"email": "new@example.com", "code": "123456", "full_name": "Meera"},
-        )
-        assert first.status_code == 200, first.text
-        assert first.json()["user"]["role"] == "CUSTOMER"
-        tenant = db_session.scalar(select(Tenant).where(Tenant.email == "new@example.com"))
-        assert tenant is not None and tenant.name == "Meera"
-        # Signing in again uses the same account and tenant.
-        again = client.post(
-            f"{CUSTOMER}/otp/verify", json={"email": "new@example.com", "code": "123456"}
-        )
-        assert again.json()["user"]["id"] == first.json()["user"]["id"]
-        assert db_session.scalar(select(func.count()).select_from(Tenant)) == 1
-        # An administrator cannot sign in to the customer app with a code.
-        admin_id = uuid.uuid4()
-        db_session.add(AppUser(id=admin_id, email="boss@example.com", role=UserRole.ADMIN))
-        db_session.commit()
-        gateway.users["boss@example.com"] = admin_id
-        refused = client.post(
-            f"{CUSTOMER}/otp/verify", json={"email": "boss@example.com", "code": "123456"}
-        )
-        assert refused.status_code == 403
-        assert (
-            client.post(
-                f"{CUSTOMER}/otp/verify", json={"email": "x@example.com", "code": "12ab56"}
-            ).status_code
-            == 422
-        )
-    finally:
-        app.dependency_overrides.pop(get_auth_gateway, None)

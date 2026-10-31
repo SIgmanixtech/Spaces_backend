@@ -104,9 +104,10 @@ def _occupancy_trend(session: Session, today: date) -> list[OccupancyTrendPoint]
     spaces = [
         (space_id, property_id, local_day(created_at), local_day(archived_at))
         for space_id, property_id, created_at, archived_at in session.execute(
-            select(Space.id, Space.property_id, Space.created_at, Space.archived_at).where(
-                is_rentable_unit()
-            )
+            # Archived properties are left out, as in the summary's current counts.
+            select(Space.id, Space.property_id, Space.created_at, Space.archived_at)
+            .join(Property, Property.id == Space.property_id)
+            .where(is_rentable_unit(), Property.archived_at.is_(None))
         )
     ]
     occupancies = session.execute(

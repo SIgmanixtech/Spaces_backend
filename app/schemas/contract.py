@@ -5,6 +5,7 @@ from typing import ClassVar, Literal, Self
 
 from pydantic import Field, model_validator
 
+from app.models.enums import ContractType
 from app.schemas.common import ConflictDetail, InputSchema, ReadSchema, UpdateSchema
 
 ContractState = Literal["PENDING", "ACTIVE", "EXPIRED", "CANCELLED", "TERMINATED"]
@@ -52,6 +53,11 @@ class ContractUpdate(UpdateSchema):
     notes: str | None = None
     start_date: date | None = Field(default=None, description="Only while PENDING.")
     end_date: date | None = Field(default=None, description="Only while PENDING.")
+    contract_type: ContractType | None = Field(
+        default=None,
+        description="SPACE_LEASE or COWORKING_LICENCE: which agreement applies. Null falls "
+        "back to the space's setting.",
+    )
 
 
 class ContractCancel(InputSchema):
@@ -97,11 +103,23 @@ class ContractRead(ReadSchema):
     currency: str
     terms: str | None
     notes: str | None
+    contract_type: ContractType | None = Field(
+        default=None, description="Set on the contract, or null to use the space's setting."
+    )
     activated_at: datetime | None
     cancelled_at: datetime | None
     cancellation_reason: str | None
     terminated_at: datetime | None
     termination_reason: str | None
+    group_id: uuid.UUID | None = Field(
+        default=None,
+        description="Set when this row is one seat of a contract for several seats. "
+        "Approving or rejecting one row acts on every pending row of the group.",
+    )
+    group_reference: str | None = Field(
+        default=None, description="The reference the group is shown under (its first row)."
+    )
+    group_spaces: list[str] = Field(default_factory=list, description="Every seat of the group.")
     created_at: datetime
     updated_at: datetime
 

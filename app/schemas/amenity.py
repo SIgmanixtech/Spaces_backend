@@ -4,12 +4,23 @@ from typing import ClassVar
 
 from pydantic import Field
 
-from app.models.enums import AmenityStatus
+from app.models.enums import AmenityLevel, AmenityStatus
 from app.schemas.common import InputSchema, ReadSchema, UpdateSchema
 
 
 class AmenityCreate(InputSchema):
     property_id: uuid.UUID
+    building_id: uuid.UUID | None = Field(
+        default=None, description="Assign at this building of the property."
+    )
+    floor_id: uuid.UUID | None = Field(
+        default=None, description="Assign at this floor of the property."
+    )
+    space_id: uuid.UUID | None = Field(
+        default=None,
+        description="Assign at this space of the property. Not the whole-floor space: use "
+        "floor_id for amenities of the whole floor.",
+    )
     name: str = Field(
         min_length=1,
         max_length=120,
@@ -43,9 +54,48 @@ class AmenityRead(ReadSchema):
     description: str | None
     property_id: uuid.UUID
     property_name: str
+    level: AmenityLevel = Field(description="PROPERTY, BUILDING, FLOOR or SPACE.")
+    building_id: uuid.UUID | None
+    building_name: str | None
+    floor_id: uuid.UUID | None
+    floor_name: str | None
+    space_id: uuid.UUID | None
+    space_name: str | None
     opening_time: time | None
     closing_time: time | None
     status: AmenityStatus
     notes: str | None
     created_at: datetime
     updated_at: datetime
+
+
+class AmenitySource(ReadSchema):
+    """One active assignment an effective amenity comes from."""
+
+    level: AmenityLevel
+    place_id: uuid.UUID = Field(description="The property, building, floor or space.")
+    place_name: str
+    assignment_id: uuid.UUID
+    opening_time: time | None
+    closing_time: time | None
+    notes: str | None
+
+
+class EffectiveAmenity(ReadSchema):
+    """An amenity that applies at a place: assigned there, or inherited from a parent
+    space, its floor, its building or its property. Listed once, with every source,
+    nearest first."""
+
+    amenity_id: uuid.UUID
+    name: str
+    description: str | None
+    is_direct: bool = Field(description="Assigned at this place itself.")
+    sources: list[AmenitySource]
+
+
+class EffectiveAmenities(ReadSchema):
+    level: AmenityLevel
+    place_id: uuid.UUID
+    place_name: str
+    property_id: uuid.UUID
+    amenities: list[EffectiveAmenity]

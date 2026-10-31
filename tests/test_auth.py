@@ -45,17 +45,21 @@ def test_every_business_route_requires_authentication(client: TestClient) -> Non
     public = {
         "/api/v1/health",
         "/api/v1/health/ready",
-        "/api/v1/auth/login",
-        "/api/v1/auth/refresh",
+        "/api/v1/admin/auth/login",
+        "/api/v1/admin/auth/refresh",
+        "/api/v1/client/auth/login",
+        "/api/v1/client/auth/refresh",
         # The client app: signing up and resetting a password happen before sign-in.
-        "/api/v1/customer/register",
-        "/api/v1/customer/password-recovery",
-        "/api/v1/customer/resend-confirmation",
-        "/api/v1/customer/otp/request",
-        "/api/v1/customer/otp/verify",
+        "/api/v1/client/password-recovery",
+        # The link's token is the proof; only invited tenants can use it.
+        "/api/v1/client/auth/set-password",
+        "/api/v1/client/otp/request",
+        "/api/v1/client/otp/verify",
+        "/api/v1/client/phone-otp/request",
+        "/api/v1/client/phone-otp/verify",
     }
     # The published-property catalogue is public by design and lives under its own prefix.
-    catalogue = "/api/v1/public/"
+    catalogue = "/api/v1/client/public/"
     schema = client.get("/api/v1/openapi.json").json()
     assert any(path.startswith(catalogue) for path in schema["paths"])
 
@@ -77,6 +81,7 @@ def test_me_returns_the_admin(api: TestClient, admin_user: AppUser) -> None:
     assert response.json() == {
         "id": str(admin_user.id),
         "email": "admin@example.com",
+        "phone": None,
         "full_name": None,
         "role": "ADMIN",
     }

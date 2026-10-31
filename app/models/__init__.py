@@ -1,6 +1,7 @@
 """ORM models. Import every model module here so Alembic autogenerate sees it."""
 
 from app.models.activity import ActivityLog
+from app.models.agreement import ContractDocument, ContractTemplate
 from app.models.allocation import Allocation, AllocationClaim
 from app.models.amenity import Amenity, PropertyAmenity
 from app.models.asset import Asset
@@ -10,6 +11,11 @@ from app.models.file import StoredFile
 from app.models.layout import Layout
 from app.models.pricing import BillingProfile, PricingRule
 from app.models.property import Property
+from app.models.reimbursement import (
+    ReimbursementExpense,
+    ReimbursementExpenseType,
+    ReimbursementTerm,
+)
 from app.models.space import Space
 from app.models.tenant import Tenant, TenantOccupancy
 from app.models.user import AppUser
@@ -22,6 +28,8 @@ __all__ = [
     "AppUser",
     "Asset",
     "BillingProfile",
+    "ContractDocument",
+    "ContractTemplate",
     "Booking",
     "Building",
     "Floor",
@@ -29,6 +37,9 @@ __all__ = [
     "Property",
     "PricingRule",
     "PropertyAmenity",
+    "ReimbursementExpense",
+    "ReimbursementExpenseType",
+    "ReimbursementTerm",
     "Space",
     "StoredFile",
     "Tenant",
