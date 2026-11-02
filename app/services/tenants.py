@@ -3,7 +3,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from sqlalchemy import exists, or_, select
 
@@ -18,6 +18,7 @@ from app.schemas.tenant import OccupancyRead, TenantRead
 from app.services.base import (
     DERIVED_FILTER_LIMIT,
     CrudService,
+    log_activity,
     page_of,
     require,
 )
@@ -54,6 +55,47 @@ class TenantService(CrudService[Tenant]):
     def keep_for_history(self, record: Tenant) -> bool:
         # A customer's own record: their account still points at it.
         return record.user_id is not None
+
+    FIELD_NAMES: ClassVar[dict[str, str]] = {
+        "name": "name",
+        "company_name": "company",
+        "email": "email",
+        "phone": "phone",
+        "status": "status",
+        "notes": "notes",
+    }
+
+    def update(self, record_id: uuid.UUID, values: dict[str, Any]) -> Tenant:
+        """As before, and the history entry names the fields that changed (not values)."""
+        record = self.get(record_id)
+        self._changes = [
+            self.FIELD_NAMES.get(key, key)
+            for key, value in values.items()
+            if getattr(record, key) != value
+        ]
+        try:
+            return super().update(record_id, values)
+        finally:
+            self._changes = None
+
+    def _log(self, action: str, record: Tenant) -> None:
+        changes = getattr(self, "_changes", None)
+        if action != "updated" or changes is None:
+            super()._log(action, record)
+            return
+        log_activity(
+            self.session,
+            self.actor,
+            action=action,
+            entity_type=self.model.__tablename__,
+            entity_id=record.id,
+            property_id=self.property_id_of(record),
+            message=(
+                f'{self.label} "{self.describe(record)}" was updated: {", ".join(changes)}.'
+                if changes
+                else f'{self.label} "{self.describe(record)}" was saved without changes.'
+            )[:500],
+        )
 
     def search(
         self,

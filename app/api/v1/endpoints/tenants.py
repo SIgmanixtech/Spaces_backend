@@ -7,6 +7,7 @@ from app.api.dependencies import CurrentAdmin, DbSession, ListParams
 from app.api.responses import CONFLICT, NOT_FOUND, PROTECTED, _error
 from app.models.enums import OccupancyStatus, TenantStatus
 from app.schemas.common import Page, RemovalRead
+from app.schemas.crm import DuplicateMatch
 from app.schemas.tenant import (
     ClientAccessRead,
     ClientAccessRequest,
@@ -14,11 +15,13 @@ from app.schemas.tenant import (
     OccupancyRead,
     OccupancyUpdate,
     TenantCreate,
+    TenantDuplicateCheck,
     TenantRead,
     TenantUpdate,
 )
 from app.services.auth import SupabaseAuthGateway, get_auth_gateway
 from app.services.client_access import ClientAccessService
+from app.services.crm import CrmService
 from app.services.tenants import TenantService
 
 Gateway = Annotated[SupabaseAuthGateway, Depends(get_auth_gateway)]
@@ -60,6 +63,26 @@ def list_tenants(
 def create_tenant(admin: CurrentAdmin, session: DbSession, body: TenantCreate) -> TenantRead:
     service = TenantService(session, admin)
     return service.to_read([service.create(body.model_dump())])[0]
+
+
+@router.post(
+    "/check-duplicates",
+    response_model=list[DuplicateMatch],
+    summary="Existing tenants that may be the same person or company",
+)
+def check_tenant_duplicates(
+    admin: CurrentAdmin, session: DbSession, body: TenantDuplicateCheck
+) -> list[DuplicateMatch]:
+    """Tenants with the same normalised email, phone or company (never by name alone), using
+    the CRM duplicate matching. Warning only: creating or saving a tenant is never refused,
+    merged or changed because of a match."""
+    return CrmService(session, admin).check_duplicates(
+        contact_email=body.email,
+        contact_phone=body.phone,
+        company_name=body.company_name,
+        exclude_tenant_id=body.exclude_tenant_id,
+        include_leads=False,
+    )
 
 
 @router.post(

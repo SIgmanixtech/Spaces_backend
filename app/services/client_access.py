@@ -16,7 +16,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import exists, func, select, true
+from sqlalchemy import ColumnElement, and_, exists, func, select, true
 from sqlalchemy.orm import Session
 
 from app.core.errors import ConflictError, ForbiddenError, NotFoundError
@@ -49,20 +49,39 @@ def active_tenant(session: Session, user: AppUser) -> Tenant | None:
     return tenant
 
 
+def completed_contract_condition() -> ColumnElement[bool]:
+    """BR-025 for one contract row: approved by the property team (stored ACTIVE) and its
+    agreement recorded as signed (a contract document in status SIGNED)."""
+    return and_(
+        TenantOccupancy.status == ContractStatus.ACTIVE,
+        exists().where(
+            ContractDocument.contract_id == TenantOccupancy.id,
+            ContractDocument.status == DocumentStatus.SIGNED,
+        ),
+    )
+
+
 def has_completed_contract(session: Session, tenant: Tenant) -> bool:
     """Approved by the property team and recorded as signed (BR-025)."""
-    signed = exists().where(
-        ContractDocument.contract_id == TenantOccupancy.id,
-        ContractDocument.status == DocumentStatus.SIGNED,
-    )
     return bool(
         session.scalar(
             select(
                 exists().where(
-                    TenantOccupancy.tenant_id == tenant.id,
-                    TenantOccupancy.status == ContractStatus.ACTIVE,
-                    signed,
+                    TenantOccupancy.tenant_id == tenant.id, completed_contract_condition()
                 )
+            )
+        )
+    )
+
+
+def completed_contract_ids(session: Session, contract_ids: set[uuid.UUID]) -> set[uuid.UUID]:
+    """Which of these contracts count as completed (BR-025), in one query."""
+    if not contract_ids:
+        return set()
+    return set(
+        session.scalars(
+            select(TenantOccupancy.id).where(
+                TenantOccupancy.id.in_(contract_ids), completed_contract_condition()
             )
         )
     )

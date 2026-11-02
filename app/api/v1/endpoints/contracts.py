@@ -43,10 +43,21 @@ def list_contracts(
     tenant_id: uuid.UUID | None = None,
     space_id: uuid.UUID | None = None,
     status: ContractState | None = None,
+    completed: Annotated[
+        bool | None,
+        Query(
+            description="true: completed contracts (approved and signed, BR-025); false: the rest."
+        ),
+    ] = None,
 ) -> Page[ContractRead]:
     """Latest start first. Search matches the contract reference."""
     items, total = ContractService(session, admin).list(
-        query, property_id=property_id, tenant_id=tenant_id, space_id=space_id, status=status
+        query,
+        property_id=property_id,
+        tenant_id=tenant_id,
+        space_id=space_id,
+        status=status,
+        completed=completed,
     )
     return Page(items=items, total=total, page=query.page, page_size=query.page_size)
 

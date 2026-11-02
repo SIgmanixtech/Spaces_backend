@@ -5,7 +5,7 @@ from typing import ClassVar, Literal, Self
 
 from pydantic import Field, model_validator
 
-from app.models.enums import ContractType
+from app.models.enums import ContractType, DocumentStatus
 from app.schemas.common import ConflictDetail, InputSchema, ReadSchema, UpdateSchema
 
 ContractState = Literal["PENDING", "ACTIVE", "EXPIRED", "CANCELLED", "TERMINATED"]
@@ -120,6 +120,16 @@ class ContractRead(ReadSchema):
         default=None, description="The reference the group is shown under (its first row)."
     )
     group_spaces: list[str] = Field(default_factory=list, description="Every seat of the group.")
+    agreement_status: DocumentStatus | None = Field(
+        default=None,
+        description="SIGNED when an agreement document is recorded as signed; otherwise the "
+        "latest document's status (superseded ones ignored); null when none was generated.",
+    )
+    completes_contract: bool = Field(
+        default=False,
+        description="Whether this contract counts as completed for client access (BR-025): "
+        "approved (ACTIVE) and its agreement recorded as signed.",
+    )
     created_at: datetime
     updated_at: datetime
 

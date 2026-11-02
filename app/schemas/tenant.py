@@ -127,3 +127,14 @@ class ClientAccessRead(ReadSchema):
         description="Only when no email was requested: the link to share with the tenant."
     )
     message: str
+
+
+class TenantDuplicateCheck(InputSchema):
+    """Details typed into the tenant form. Warning only: nothing is merged or refused."""
+
+    email: str | None = Field(default=None, max_length=320)
+    phone: str | None = Field(default=None, max_length=32)
+    company_name: str | None = Field(default=None, max_length=200)
+    exclude_tenant_id: uuid.UUID | None = Field(
+        default=None, description="The tenant being edited, so it does not match itself."
+    )

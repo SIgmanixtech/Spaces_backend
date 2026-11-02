@@ -33,12 +33,14 @@ from sqlalchemy.orm import Session
 
 from app.core.errors import BadRequestError, ConflictError, NotFoundError
 from app.models.activity import ActivityLog
+from app.models.agreement import ContractDocument
 from app.models.allocation import Allocation
 from app.models.booking import Booking
 from app.models.enums import (
     HOLDING_CONTRACT_STATUSES,
     AllocationSource,
     ContractStatus,
+    DocumentStatus,
     PropertyStatus,
     SpaceOperationalStatus,
     SpaceType,
@@ -63,6 +65,7 @@ from app.services.allocations import (
     contract_period,
 )
 from app.services.base import commit, flush, log_activity, require
+from app.services.client_access import completed_contract_condition, completed_contract_ids
 from app.services.occupancy import business_today
 
 ENTITY_TYPES = ("contracts", "tenant_occupancies")
@@ -98,8 +101,13 @@ class ContractService:
         tenant_id: uuid.UUID | None = None,
         space_id: uuid.UUID | None = None,
         status: str | None = None,
+        completed: bool | None = None,
     ) -> tuple[list[ContractRead], int]:
         statement = select(TenantOccupancy)
+        if completed is not None:
+            # BR-025, the same rule as client access: approved (ACTIVE) and signed.
+            done = completed_contract_condition()
+            statement = statement.where(done if completed else ~done)
         for column, value in (
             (TenantOccupancy.property_id, property_id),
             (TenantOccupancy.tenant_id, tenant_id),
@@ -568,6 +576,9 @@ class ContractService:
             )
         }
         groups = group_details(self.session, {c.group_id for c in contracts if c.group_id})
+        ids = {c.id for c in contracts}
+        agreements = self._agreement_statuses(ids)
+        completed = completed_contract_ids(self.session, ids)
         today = business_today()
         # A customer's pending request holds its space too; read the holds, not the status.
         held = {
@@ -611,8 +622,27 @@ class ContractService:
                     group_id=c.group_id,
                     group_reference=groups[c.group_id][0] if c.group_id in groups else None,
                     group_spaces=groups[c.group_id][1] if c.group_id in groups else [],
+                    agreement_status=agreements.get(c.id),
+                    completes_contract=c.id in completed,
                 )
             )
+        return out
+
+    def _agreement_statuses(self, ids: set[uuid.UUID]) -> dict[uuid.UUID, DocumentStatus]:
+        """Each contract's agreement status, read-only: SIGNED if any document is signed,
+        otherwise its newest document that is not superseded."""
+        out: dict[uuid.UUID, DocumentStatus] = {}
+        rows = self.session.execute(
+            select(ContractDocument.contract_id, ContractDocument.status)
+            .where(
+                ContractDocument.contract_id.in_(ids),
+                ContractDocument.status != DocumentStatus.SUPERSEDED,
+            )
+            .order_by(ContractDocument.created_at, ContractDocument.id)
+        )
+        for contract_id, status in rows:
+            if out.get(contract_id) != DocumentStatus.SIGNED:
+                out[contract_id] = DocumentStatus(status)
         return out
 
 
