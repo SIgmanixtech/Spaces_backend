@@ -67,6 +67,9 @@ class SpaceType(StrEnum):
     SEAT = "SEAT"
     # Any other rentable space (storage, kiosk, studio...).
     OTHER = "OTHER"
+    # A rentable parking slot (BR-032, D18): its own availability and pricing, held by the
+    # same allocation engine as every other space.
+    PARKING_SLOT = "PARKING_SLOT"
 
 
 class SpaceOperationalStatus(StrEnum):

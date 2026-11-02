@@ -41,6 +41,7 @@ TYPE_WORDS = {
     SpaceType.FLEXIBLE_WORKSTATION: "hot desk",
     SpaceType.DESK: "desk",
     SpaceType.SEAT: "seat",
+    SpaceType.PARKING_SLOT: "parking slot",
     SpaceType.PORTION: "portion",
     SpaceType.FLOOR: "whole floor",
 }

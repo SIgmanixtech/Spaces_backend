@@ -1305,3 +1305,46 @@ def test_0016_and_0017_downgrades_refuse_to_discard_data(migrations: Config) -> 
     command.downgrade(migrations, "0015")
     dispose_engine()
     assert current_revision() == "0015"
+
+
+def test_revision_0018_renders_as_sql_without_a_database(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command.upgrade(alembic_config(), "0017:0018", sql=True)
+    upgrade = capsys.readouterr().out
+    for name in (
+        "ck_spaces_space_type_valid",
+        "ck_pricing_rules_applies_to_valid",
+        "ck_leads_space_type_valid",
+    ):
+        assert f"ADD CONSTRAINT {name} CHECK" in upgrade
+    # Only the checks change: every earlier value is still allowed, no row is touched.
+    for value in ("'DESK'", "'SEAT'", "'OTHER'", "'NON_RENTABLE'", "'PARKING_SLOT'"):
+        assert upgrade.count(value) == 3
+    statements = [
+        line for line in upgrade.splitlines() if line.startswith(("INSERT", "UPDATE", "DELETE"))
+    ]
+    assert all("alembic_version" in line for line in statements)
+    command.downgrade(alembic_config(), "0018:0017", sql=True)
+    downgrade = capsys.readouterr().out
+    assert downgrade.index("Cannot downgrade past 0018") < downgrade.index("DROP CONSTRAINT")
+
+
+def test_0018_downgrade_refuses_while_parking_slots_exist(migrations: Config) -> None:
+    head = ScriptDirectory.from_config(migrations).get_current_head()
+    with get_engine().begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO leads (source, company_name, space_type)"
+                " VALUES ('MANUAL', 'Acme', 'PARKING_SLOT')"
+            )
+        )
+    with pytest.raises(DBAPIError, match="Cannot downgrade past 0018"):
+        command.downgrade(migrations, "0017")
+    dispose_engine()
+    assert current_revision() == head
+    with get_engine().begin() as connection:
+        connection.execute(text("DELETE FROM leads"))
+    command.downgrade(migrations, "0017")
+    dispose_engine()
+    assert current_revision() == "0017"

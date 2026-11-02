@@ -51,6 +51,8 @@ ALLOWED_PARENTS: dict[SpaceType, frozenset[SpaceType]] = {
     SpaceType.NON_RENTABLE: _FLOOR_OR_PORTION,
     SpaceType.DESK: _FLOOR_OR_PORTION | {SpaceType.PRIVATE_OFFICE, SpaceType.COWORKING},
     SpaceType.OTHER: _FLOOR_OR_PORTION,
+    # A parking slot sits on a (basement or parking) floor, or in a portion of one.
+    SpaceType.PARKING_SLOT: _FLOOR_OR_PORTION,
     # A dedicated workstation may sit in an office or cabin it belongs to.
     SpaceType.DEDICATED_WORKSTATION: _FLOOR_OR_PORTION
     | {SpaceType.COWORKING, SpaceType.PRIVATE_OFFICE, SpaceType.CABIN},

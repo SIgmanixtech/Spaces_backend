@@ -72,6 +72,7 @@ SPACE_TYPE_LABEL = {
     SpaceType.FLEXIBLE_WORKSTATION: "Flexible workstation",
     SpaceType.SEAT: "Seat",
     SpaceType.OTHER: "Other rentable space",
+    SpaceType.PARKING_SLOT: "Parking slot",
     SpaceType.NON_RENTABLE: "Non-rentable",
 }
 PERIOD_LABEL = {

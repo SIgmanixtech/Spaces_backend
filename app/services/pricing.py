@@ -75,7 +75,7 @@ FIXED_BASIS_TYPES: dict[RateBasis, frozenset[SpaceType]] = {
     RateBasis.PER_SEAT: frozenset({SpaceType.SEAT}),
     RateBasis.PER_ROOM: frozenset({SpaceType.MEETING_ROOM}),
     RateBasis.PER_HALL: frozenset({SpaceType.CONFERENCE_ROOM, SpaceType.TRAINING_ROOM}),
-    RateBasis.PER_UNIT: frozenset({SpaceType.COWORKING, SpaceType.OTHER}),
+    RateBasis.PER_UNIT: frozenset({SpaceType.COWORKING, SpaceType.OTHER, SpaceType.PARKING_SLOT}),
 }
 # Bases measured by the space, which a space inherits from the spaces containing it.
 MEASURED = (RateBasis.PER_SQFT, RateBasis.PER_PERSON)
