@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.errors import BadRequestError
 from app.db.base import Base
+from app.models.account import Account
 from app.models.activity import ActivityLog
 from app.models.agreement import ContractDocument, ContractTemplate
 from app.models.amenity import PropertyAmenity
@@ -80,6 +81,7 @@ ENTITY_LABELS = {
     "leads": "Lead",
     "lead_imports": "Lead import",
     "meta_lead_forms": "Meta lead form",
+    "accounts": "Account",
 }
 ACTION_LABELS = {
     "created": "Created",
@@ -117,6 +119,7 @@ ACTION_LABELS = {
     "imported": "Imported",
     "source_changed": "Source changed",
     "synced": "Synced",
+    "opened": "Opened",
     "task_deleted": "Follow-up deleted",
 }
 # The record each kind of entry points at, to see whether it still exists.
@@ -143,6 +146,7 @@ MODELS: dict[str, type[Base]] = {
     "leads": Lead,
     "lead_imports": LeadImportBatch,
     "meta_lead_forms": MetaLeadForm,
+    "accounts": Account,
 }
 NAME_FIELDS = ("name", "reference", "original_name")
 

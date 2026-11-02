@@ -1255,3 +1255,53 @@ def test_0015_downgrade_refuses_to_discard_import_history(migrations: Config) ->
             connection.execute(text("SELECT to_regclass('public.lead_import_batches')")).scalar()
             is None
         )
+
+
+def test_revisions_0016_and_0017_render_as_sql_without_a_database(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command.upgrade(alembic_config(), "0015:0017", sql=True)
+    upgrade = capsys.readouterr().out
+    for table in ("meta_lead_forms", "meta_lead_events", "accounts"):
+        assert f"CREATE TABLE {table}" in upgrade
+    # Additive: new tables only; no existing table is altered and no data is written.
+    assert "ALTER TABLE" not in upgrade.replace("ALTER TABLE alembic_version", "")
+    assert "DROP " not in upgrade
+    statements = [
+        line for line in upgrade.splitlines() if line.startswith(("INSERT", "UPDATE", "DELETE"))
+    ]
+    assert all("alembic_version" in line for line in statements)
+    command.downgrade(alembic_config(), "0017:0015", sql=True)
+    downgrade = capsys.readouterr().out
+    assert downgrade.index("Cannot downgrade past 0017") < downgrade.index("DROP TABLE accounts")
+    assert downgrade.index("Cannot downgrade past 0016") < downgrade.index(
+        "DROP TABLE meta_lead_events"
+    )
+
+
+def test_0016_and_0017_downgrades_refuse_to_discard_data(migrations: Config) -> None:
+    head = ScriptDirectory.from_config(migrations).get_current_head()
+    with get_engine().begin() as connection:
+        tenant = connection.execute(
+            text("INSERT INTO tenants (name) VALUES ('Acme') RETURNING id")
+        ).scalar_one()
+        connection.execute(text("INSERT INTO accounts (tenant_id) VALUES (:t)"), {"t": tenant})
+    with pytest.raises(DBAPIError, match="Cannot downgrade past 0017: 1 account"):
+        command.downgrade(migrations, "0016")
+    dispose_engine()
+    assert current_revision() == head
+    with get_engine().begin() as connection:
+        connection.execute(text("DELETE FROM accounts"))
+        connection.execute(
+            text("INSERT INTO meta_lead_forms (form_id, name) VALUES ('555', 'Offices')")
+        )
+    with pytest.raises(DBAPIError, match="Cannot downgrade past 0016: 1 Meta form"):
+        command.downgrade(migrations, "0015")
+    dispose_engine()
+    # Refused as a whole (one transaction): still at the latest revision.
+    assert current_revision() == head
+    with get_engine().begin() as connection:
+        connection.execute(text("DELETE FROM meta_lead_forms"))
+    command.downgrade(migrations, "0015")
+    dispose_engine()
+    assert current_revision() == "0015"

@@ -15,6 +15,7 @@ hidden from the API docs and will be removed later.
 from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
+    accounts,
     activity,
     agreements,
     amenities,
@@ -62,6 +63,7 @@ ADMIN_ROUTERS = (
     reimbursements.router,
     crm.router,
     meta_leads.router,
+    accounts.router,
 )
 
 admin_api = APIRouter(prefix="/admin")

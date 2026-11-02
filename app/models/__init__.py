@@ -1,5 +1,6 @@
 """ORM models. Import every model module here so Alembic autogenerate sees it."""
 
+from app.models.account import Account
 from app.models.activity import ActivityLog
 from app.models.agreement import ContractDocument, ContractTemplate
 from app.models.allocation import Allocation, AllocationClaim
@@ -36,6 +37,7 @@ __all__ = [
     "Building",
     "Floor",
     "Layout",
+    "Account",
     "Lead",
     "LeadImportBatch",
     "LeadInterest",
