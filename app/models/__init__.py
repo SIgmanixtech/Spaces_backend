@@ -10,6 +10,7 @@ from app.models.building import Building, Floor
 from app.models.crm import Lead, LeadImportBatch, LeadInterest, LeadNote, LeadTask
 from app.models.file import StoredFile
 from app.models.layout import Layout
+from app.models.meta import MetaLeadEvent, MetaLeadForm
 from app.models.pricing import BillingProfile, PricingRule
 from app.models.property import Property
 from app.models.reimbursement import (
@@ -40,6 +41,8 @@ __all__ = [
     "LeadInterest",
     "LeadNote",
     "LeadTask",
+    "MetaLeadEvent",
+    "MetaLeadForm",
     "Property",
     "PricingRule",
     "PropertyAmenity",

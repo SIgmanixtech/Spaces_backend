@@ -58,6 +58,15 @@ class Settings(BaseSettings):
     # The customer app's address. Links in Supabase emails (confirm sign-up, reset
     # password) send people back here; it must also be in Supabase's Redirect URLs.
     customer_app_url: AnyHttpUrl | None = None
+
+    # Meta Ads lead import (Phase 3B-2, polling). Off until all three are set. The token
+    # and secret are never logged or returned by the API. The Graph API version is taken
+    # from Meta's documentation when the integration is set up (e.g. "v21.0").
+    meta_graph_api_version: str | None = None
+    meta_page_access_token: SecretStr | None = None
+    # Used to sign each Graph API call (appsecret_proof).
+    meta_app_secret: SecretStr | None = None
+    meta_timeout_seconds: float = 10.0
     # Natural-language space search: Claude reads each search in context when
     # ANTHROPIC_API_KEY is set; without a key (or with this false) the built-in parser does.
     search_ai_enabled: bool = True

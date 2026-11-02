@@ -79,6 +79,28 @@ def purge_orphan_files(delete: bool, min_age_hours: float) -> int:
     return 0
 
 
+def sync_meta_leads() -> int:
+    """Fetch and import new Meta Ads leads of the enabled forms (Phase 3B-2). Meant for a
+    scheduler; safe to repeat: each Meta lead is stored and imported once."""
+    from app.services.meta_leads import MetaLeadService, client_from_settings, missing_settings
+
+    settings = get_settings()
+    missing = missing_settings(settings)
+    if missing:
+        print("Meta Ads is not configured. Missing: " + ", ".join(missing) + ".")
+        return 2
+    with get_session_factory()() as session:
+        result = MetaLeadService(session, None, client_from_settings(settings)).sync()
+    for form in result.forms:
+        problem = f" ERROR: {form.error}" if form.error else ""
+        print(
+            f"{form.name}: {form.received} new, {form.already_known} already received, "
+            f"{form.imported} imported, {form.failed} failed.{problem}"
+        )
+    print(f"Done: {result.received} new, {result.imported} imported, {result.failed} failed.")
+    return 1 if any(f.error for f in result.forms) else 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -88,12 +110,15 @@ def main() -> int:
     purge = commands.add_parser("purge-orphan-files")
     purge.add_argument("--delete", action="store_true", help="remove them, not just list them")
     purge.add_argument("--min-age-hours", type=float, default=1.0)
+    commands.add_parser("sync-meta-leads", help="import new Meta Ads leads (for a scheduler)")
     args = parser.parse_args()
 
     if args.command == "grant-admin":
         return grant_admin(args.email)
     if args.command == "revoke-access":
         return revoke_access(args.email)
+    if args.command == "sync-meta-leads":
+        return sync_meta_leads()
     if args.command == "purge-orphan-files":
         return purge_orphan_files(args.delete, args.min_age_hours)
     return list_users()

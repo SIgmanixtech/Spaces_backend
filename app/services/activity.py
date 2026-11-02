@@ -34,6 +34,7 @@ from app.models.building import Building, Floor
 from app.models.crm import Lead, LeadImportBatch
 from app.models.file import StoredFile
 from app.models.layout import Layout
+from app.models.meta import MetaLeadForm
 from app.models.pricing import BillingProfile, PricingRule
 from app.models.property import Property
 from app.models.reimbursement import (
@@ -78,6 +79,7 @@ ENTITY_LABELS = {
     "contract_documents": "Contract document",
     "leads": "Lead",
     "lead_imports": "Lead import",
+    "meta_lead_forms": "Meta lead form",
 }
 ACTION_LABELS = {
     "created": "Created",
@@ -114,6 +116,7 @@ ACTION_LABELS = {
     "task_reopened": "Follow-up reopened",
     "imported": "Imported",
     "source_changed": "Source changed",
+    "synced": "Synced",
     "task_deleted": "Follow-up deleted",
 }
 # The record each kind of entry points at, to see whether it still exists.
@@ -139,6 +142,7 @@ MODELS: dict[str, type[Base]] = {
     "contract_documents": ContractDocument,
     "leads": Lead,
     "lead_imports": LeadImportBatch,
+    "meta_lead_forms": MetaLeadForm,
 }
 NAME_FIELDS = ("name", "reference", "original_name")
 

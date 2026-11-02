@@ -29,6 +29,7 @@ from app.api.v1.endpoints import (
     floors,
     health,
     layouts,
+    meta_leads,
     pricing,
     properties,
     property_dashboard,
@@ -60,6 +61,7 @@ ADMIN_ROUTERS = (
     pricing.profile_router,
     reimbursements.router,
     crm.router,
+    meta_leads.router,
 )
 
 admin_api = APIRouter(prefix="/admin")

@@ -317,3 +317,16 @@ class LeadImportFileType(StrEnum):
 
     XLSX = "XLSX"
     CSV = "CSV"
+
+
+class MetaLeadStatus(StrEnum):
+    """A lead received from Meta Ads (Phase 3B-2).
+
+    RECEIVED  stored, not processed yet
+    IMPORTED  a CRM lead was created from it (exactly once)
+    FAILED    could not become a lead (see last_error); an admin can reprocess it
+    """
+
+    RECEIVED = "RECEIVED"
+    IMPORTED = "IMPORTED"
+    FAILED = "FAILED"
