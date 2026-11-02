@@ -13,6 +13,8 @@ email-validator==2.3.0
 httpx==0.28.1
 # Contract agreements: fills admin-approved Word (.docx) templates
 docxtpl==0.19.1
+# Lead spreadsheet import (Phase 3B-1): reads .xlsx files; formulas are never calculated
+openpyxl==3.1.5
 # Optional AI reading of search sentences (off unless SEARCH_AI_ENABLED and a key are set)
 anthropic==2.3.0
 

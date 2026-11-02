@@ -31,6 +31,7 @@ from app.models.amenity import PropertyAmenity
 from app.models.asset import Asset
 from app.models.booking import Booking
 from app.models.building import Building, Floor
+from app.models.crm import Lead, LeadImportBatch
 from app.models.file import StoredFile
 from app.models.layout import Layout
 from app.models.pricing import BillingProfile, PricingRule
@@ -75,6 +76,8 @@ ENTITY_LABELS = {
     "reimbursement_expenses": "Reimbursement expense",
     "contract_templates": "Contract template",
     "contract_documents": "Contract document",
+    "leads": "Lead",
+    "lead_imports": "Lead import",
 }
 ACTION_LABELS = {
     "created": "Created",
@@ -99,6 +102,19 @@ ACTION_LABELS = {
     "client_invited": "Client app invitation sent",
     "client_activated": "Client app activated",
     "password_changed": "Password changed",
+    "stage_changed": "Stage changed",
+    "interest_added": "Interest added",
+    "interest_removed": "Interest removed",
+    "note_added": "Note added",
+    "note_updated": "Note edited",
+    "note_deleted": "Note deleted",
+    "task_added": "Follow-up added",
+    "task_updated": "Follow-up updated",
+    "task_completed": "Follow-up completed",
+    "task_reopened": "Follow-up reopened",
+    "imported": "Imported",
+    "source_changed": "Source changed",
+    "task_deleted": "Follow-up deleted",
 }
 # The record each kind of entry points at, to see whether it still exists.
 MODELS: dict[str, type[Base]] = {
@@ -121,6 +137,8 @@ MODELS: dict[str, type[Base]] = {
     "reimbursement_expenses": ReimbursementExpense,
     "contract_templates": ContractTemplate,
     "contract_documents": ContractDocument,
+    "leads": Lead,
+    "lead_imports": LeadImportBatch,
 }
 NAME_FIELDS = ("name", "reference", "original_name")
 

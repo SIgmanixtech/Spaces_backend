@@ -32,6 +32,8 @@ _CONSTRAINT_MESSAGES = {
     "uq_property_amenities_building": "This amenity is already assigned to the building.",
     "uq_property_amenities_floor": "This amenity is already assigned to the floor.",
     "uq_property_amenities_space": "This amenity is already assigned to the space.",
+    "uq_lead_interests_property": "This property is already listed as an interest of the lead.",
+    "uq_lead_interests_space": "This space is already listed as an interest of the lead.",
     "fk_property_amenities_building_id_buildings": (
         "This building has amenities assigned to it, or to its floors. Remove those amenity "
         "assignments first."

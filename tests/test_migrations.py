@@ -12,6 +12,7 @@ from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.config import Config
 from alembic.migration import MigrationContext
+from alembic.script import ScriptDirectory
 from sqlalchemy import Connection, text
 from sqlalchemy.exc import DBAPIError
 
@@ -1151,3 +1152,106 @@ def test_revision_0013_renders_as_sql_without_a_database(
     assert all("alembic_version" in line for line in statements)
     command.downgrade(alembic_config(), "0013:0012", sql=True)
     assert "Cannot downgrade past 0013" in capsys.readouterr().out
+
+
+def test_revision_0014_renders_as_sql_without_a_database(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command.upgrade(alembic_config(), "0013:0014", sql=True)
+    upgrade = capsys.readouterr().out
+    assert "CREATE SEQUENCE lead_reference_seq" in upgrade
+    for table in ("leads", "lead_interests", "lead_notes", "lead_tasks"):
+        assert f"CREATE TABLE {table}" in upgrade
+    # Additive: no existing table is altered and no data is written.
+    assert "ALTER TABLE" not in upgrade.replace("ALTER TABLE alembic_version", "")
+    statements = [
+        line for line in upgrade.splitlines() if line.startswith(("INSERT", "UPDATE", "DELETE"))
+    ]
+    assert all("alembic_version" in line for line in statements)
+    command.downgrade(alembic_config(), "0014:0013", sql=True)
+    downgrade = capsys.readouterr().out
+    assert "Cannot downgrade past 0014" in downgrade
+    assert "DROP SEQUENCE lead_reference_seq" in downgrade
+
+
+def test_0014_downgrade_refuses_to_discard_crm_data(migrations: Config) -> None:
+    with get_engine().begin() as connection:
+        connection.execute(
+            text("INSERT INTO leads (source, company_name) VALUES ('MANUAL', 'Acme')")
+        )
+    with pytest.raises(DBAPIError, match="Cannot downgrade past 0014: 1 lead"):
+        command.downgrade(migrations, "0013")
+    dispose_engine()
+    # Refused as a whole: still at the latest revision (0015 and later sit on top of 0014).
+    assert current_revision() == ScriptDirectory.from_config(migrations).get_current_head()
+    with get_engine().begin() as connection:
+        connection.execute(text("DELETE FROM leads"))
+    command.downgrade(migrations, "0013")
+    dispose_engine()
+    assert current_revision() == "0013"
+    with get_engine().connect() as connection:
+        assert connection.execute(text("SELECT to_regclass('public.leads')")).scalar() is None
+
+
+def test_revision_0015_renders_as_sql_without_a_database(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command.upgrade(alembic_config(), "0014:0015", sql=True)
+    upgrade = capsys.readouterr().out
+    assert "CREATE TABLE lead_import_batches" in upgrade
+    assert "ALTER TABLE leads ADD COLUMN import_batch_id UUID" in upgrade
+    # Additive: one new nullable column on leads, nothing dropped, no data written.
+    altered = [
+        line
+        for line in upgrade.splitlines()
+        if line.startswith("ALTER TABLE") and "alembic_version" not in line
+    ]
+    assert all(line.startswith("ALTER TABLE leads ADD ") for line in altered)
+    assert "DROP " not in upgrade
+    statements = [
+        line for line in upgrade.splitlines() if line.startswith(("INSERT", "UPDATE", "DELETE"))
+    ]
+    assert all("alembic_version" in line for line in statements)
+    command.downgrade(alembic_config(), "0015:0014", sql=True)
+    downgrade = capsys.readouterr().out
+    assert "Cannot downgrade past 0015" in downgrade
+    assert downgrade.index("Cannot downgrade past 0015") < downgrade.index("DROP TABLE")
+
+
+def test_0015_downgrade_refuses_to_discard_import_history(migrations: Config) -> None:
+    with get_engine().begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO lead_import_batches (file_name, file_sha256, file_type, total_rows,"
+                " imported_count, skipped_count, error_count, duplicate_count)"
+                " VALUES ('a.csv', repeat('a', 64), 'CSV', 0, 0, 0, 0, 0)"
+            )
+        )
+    with pytest.raises(DBAPIError, match="Cannot downgrade past 0015: 1 import"):
+        command.downgrade(migrations, "0014")
+    dispose_engine()
+    assert current_revision() == ScriptDirectory.from_config(migrations).get_current_head()
+    with get_engine().begin() as connection:
+        batch = connection.execute(text("SELECT id FROM lead_import_batches")).scalar_one()
+        connection.execute(
+            text(
+                "INSERT INTO leads (source, company_name, import_batch_id)"
+                " VALUES ('EXCEL', 'Acme', :b)"
+            ),
+            {"b": batch},
+        )
+    # A lead still links to the import: refused again, and nothing is lost.
+    with pytest.raises(DBAPIError, match=r"1 import\(s\) are recorded and 1 lead"):
+        command.downgrade(migrations, "0014")
+    dispose_engine()
+    with get_engine().begin() as connection:
+        connection.execute(text("DELETE FROM leads"))
+        connection.execute(text("DELETE FROM lead_import_batches"))
+    command.downgrade(migrations, "0014")
+    dispose_engine()
+    assert current_revision() == "0014"
+    with get_engine().connect() as connection:
+        assert (
+            connection.execute(text("SELECT to_regclass('public.lead_import_batches')")).scalar()
+            is None
+        )

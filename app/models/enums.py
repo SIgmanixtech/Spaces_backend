@@ -291,3 +291,29 @@ class ReimbursementStatus(StrEnum):
     PENDING_REVIEW = "PENDING_REVIEW"
     REVIEWED = "REVIEWED"
     REJECTED = "REJECTED"
+
+
+class LeadSource(StrEnum):
+    """Where a lead came from (BR-008). Kept for the life of the lead."""
+
+    MANUAL = "MANUAL"
+    EXCEL = "EXCEL"
+    META_ADS = "META_ADS"
+    OTHER = "OTHER"
+
+
+class LeadStage(StrEnum):
+    """The stages an administrator sets by hand (BR-006, Phase 3A). They move forward one
+    at a time. Contract Prepared, Contract Completed and Tenant Activated come from contract
+    and activation records in later phases and are not stored here."""
+
+    LEAD_CREATED = "LEAD_CREATED"
+    LEAD_REVIEWED = "LEAD_REVIEWED"
+    SPACE_SELECTED = "SPACE_SELECTED"
+
+
+class LeadImportFileType(StrEnum):
+    """Spreadsheet formats accepted by the lead import (Phase 3B-1)."""
+
+    XLSX = "XLSX"
+    CSV = "CSV"

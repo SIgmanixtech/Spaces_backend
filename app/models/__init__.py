@@ -7,6 +7,7 @@ from app.models.amenity import Amenity, PropertyAmenity
 from app.models.asset import Asset
 from app.models.booking import Booking
 from app.models.building import Building, Floor
+from app.models.crm import Lead, LeadImportBatch, LeadInterest, LeadNote, LeadTask
 from app.models.file import StoredFile
 from app.models.layout import Layout
 from app.models.pricing import BillingProfile, PricingRule
@@ -34,6 +35,11 @@ __all__ = [
     "Building",
     "Floor",
     "Layout",
+    "Lead",
+    "LeadImportBatch",
+    "LeadInterest",
+    "LeadNote",
+    "LeadTask",
     "Property",
     "PricingRule",
     "PropertyAmenity",

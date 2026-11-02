@@ -23,6 +23,7 @@ from app.api.v1.endpoints import (
     bookings,
     buildings,
     contracts,
+    crm,
     customer,
     files,
     floors,
@@ -58,6 +59,7 @@ ADMIN_ROUTERS = (
     pricing.property_router,
     pricing.profile_router,
     reimbursements.router,
+    crm.router,
 )
 
 admin_api = APIRouter(prefix="/admin")
