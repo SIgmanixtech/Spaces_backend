@@ -315,6 +315,25 @@ class LeadStage(StrEnum):
     SPACE_SELECTED = "SPACE_SELECTED"
 
 
+class ProposalStatus(StrEnum):
+    """A proposal made to a lead (Phase 4A).
+
+    DRAFT      being prepared; the only status that can be edited
+    SENT       given to the lead; "expired" is shown when past valid_until, never stored
+    ACCEPTED   the lead's acceptance was recorded by an admin (date and note)
+    REJECTED   the lead declined
+    WITHDRAWN  taken back by the property team (e.g. replaced by a revised proposal)
+
+    No status creates a contract, an allocation, a booking or a tenant.
+    """
+
+    DRAFT = "DRAFT"
+    SENT = "SENT"
+    ACCEPTED = "ACCEPTED"
+    REJECTED = "REJECTED"
+    WITHDRAWN = "WITHDRAWN"
+
+
 class LeadImportFileType(StrEnum):
     """Spreadsheet formats accepted by the lead import (Phase 3B-1)."""
 

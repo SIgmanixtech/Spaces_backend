@@ -317,3 +317,27 @@ def test_a_page_takes_a_fixed_number_of_queries(
     assert len([s for s in statements if "activity_log" in s]) == 2
     assert len(statements) <= 6 + len(kinds) + 4
     assert db_session.scalar(select(ActivityLog.id).limit(1)) is not None
+
+
+def test_an_actor_without_an_email_does_not_break_the_history(
+    api: TestClient, db_session: Session
+) -> None:
+    # Live data (3 Nov 2026): a user who signs in by mobile number has no email.
+    mobile_only = AppUser(id=uuid.uuid4(), phone="+919876543210", role=UserRole.CUSTOMER)
+    db_session.add(mobile_only)
+    db_session.flush()
+    db_session.add(
+        ActivityLog(
+            actor_id=mobile_only.id,
+            action="created",
+            entity_type="bookings",
+            message="Booking was created.",
+        )
+    )
+    db_session.commit()
+    listed = api.get(f"{V1}/admin/activity")
+    assert listed.status_code == 200, listed.text
+    actor = listed.json()["items"][0]["actor"]
+    assert (actor["id"], actor["email"]) == (str(mobile_only.id), None)
+    options = api.get(f"{V1}/admin/activity/options").json()["actors"]
+    assert {"value": str(mobile_only.id), "label": "User without an email"} in options

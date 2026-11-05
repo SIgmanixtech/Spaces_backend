@@ -21,7 +21,12 @@ from app.models import AppUser, Tenant
 from app.models.enums import UserRole
 from app.services.auth import Invitation, SupabaseAuthGateway, get_auth_gateway
 from tests.conftest import make_token
-from tests.test_agreements import make_docx, storage, upload  # noqa: F401
+from tests.test_agreements import (  # noqa: F401
+    make_docx,
+    sign_with_copy,
+    storage,
+    upload,
+)
 from tests.test_client_api import CUSTOMER, MONDAY, hub  # noqa: F401
 from tests.test_resources import V1, post
 
@@ -93,7 +98,8 @@ def contract_for(api: TestClient, tenant: dict, hub: dict) -> dict:
 
 
 def agreement(api: TestClient, contract: dict, *, up_to: str) -> None:
-    """Generate the agreement and move it forward up to the given step."""
+    """Generate the agreement and move it forward up to the given step. "sign" uploads
+    the signed copy (the plain sign step was retired in Phase 4B)."""
     template = upload(api, make_docx(["LEASE {{ contract.reference }}", "{{ lease.premises }}"]))
     api.post(f"{ADMIN}/contract-templates/{template['id']}/approve")
     made = api.post(f"{ADMIN}/contracts/{contract['id']}/agreement/documents")
@@ -101,6 +107,9 @@ def agreement(api: TestClient, contract: dict, *, up_to: str) -> None:
     for step in ("approve", "send", "sign"):
         if step == up_to:
             break
+        if step == "sign":
+            sign_with_copy(api, made.json()["id"])
+            continue
         moved = api.post(f"{ADMIN}/contract-documents/{made.json()['id']}/{step}")
         assert moved.status_code == 200, moved.text
     else:

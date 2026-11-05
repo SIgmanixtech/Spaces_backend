@@ -10,13 +10,15 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from app import __version__
-from app.api.v1.router import api_router
+from app.api.v1.router import admin_root, api_router, client_root
 from app.core.config import get_settings
 from app.core.errors import error_response, register_exception_handlers
 from app.core.logging import configure_logging, request_id_ctx
 from app.db.session import dispose_engine
 
 API_V1_PREFIX = "/api/v1"
+ADMIN_API_PREFIX = "/admin/api/v1"
+CLIENT_API_PREFIX = "/client/api/v1"
 
 logger = logging.getLogger("app.request")
 
@@ -88,6 +90,8 @@ def create_app() -> FastAPI:
     )
 
     register_exception_handlers(app)
+    app.include_router(admin_root, prefix=ADMIN_API_PREFIX)
+    app.include_router(client_root, prefix=CLIENT_API_PREFIX)
     app.include_router(api_router, prefix=API_V1_PREFIX)
     return app
 

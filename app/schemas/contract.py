@@ -80,6 +80,9 @@ class ContractExtend(InputSchema):
 class ContractRead(ReadSchema):
     id: uuid.UUID
     reference: str
+    proposal_id: uuid.UUID | None = Field(
+        default=None, description="The accepted proposal it was made from (Phase 4B)."
+    )
     tenant_id: uuid.UUID
     tenant_name: str
     property_id: uuid.UUID

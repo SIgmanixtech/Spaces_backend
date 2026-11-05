@@ -7,7 +7,12 @@ Rules (docs/BUSINESS_RULES.md):
 - BR-008: every lead keeps its source; possible duplicates by phone, email or company,
   against other leads and existing tenants, are warned about and never merged, refused or
   changed. No name matching.
-- No conversion to a tenant, no inventory hold for a space of interest, no reminders sent.
+- No inventory hold for a space of interest, no reminders sent.
+- Phase 4A (BR-007): a lead can be linked to an existing tenant, or a tenant created from
+  it. A new tenant whose details match existing tenants needs explicit confirmation. A lead
+  has at most one tenant; unlinking needs a reason. Linking keeps the lead and its history,
+  gives no client-app access and creates no contract, allocation or account. Entries name
+  the lead and tenant only, never legal details.
 
 History goes to the existing activity log under entity type "leads" with the lead's id,
 so the Activity page and a lead's history show every step.
@@ -41,6 +46,7 @@ from app.schemas.crm import (
 )
 from app.services.base import commit, flush, log_activity
 from app.services.occupancy import business_today
+from app.services.proposals import is_prospect_clause
 
 STAGE_ORDER = [LeadStage.LEAD_CREATED, LeadStage.LEAD_REVIEWED, LeadStage.SPACE_SELECTED]
 STAGE_LABEL = {
@@ -191,6 +197,18 @@ class CrmService:
                 )
             ).all()
         )
+        tenants = dict(
+            self.session.execute(
+                select(Tenant.id, Tenant.name).where(
+                    Tenant.id.in_({lead.tenant_id for lead in leads if lead.tenant_id})
+                )
+            ).all()
+        )
+        prospects = set(
+            self.session.scalars(
+                select(Lead.id).where(Lead.id.in_(ids), is_prospect_clause(Lead.id))
+            )
+        )
         today = business_today()
         counts = {
             lead_id: (open_, overdue)
@@ -236,6 +254,10 @@ class CrmService:
                     next_stage=next_stage(lead.stage),
                     open_tasks=open_,
                     overdue_tasks=overdue,
+                    tenant_id=lead.tenant_id,
+                    tenant_name=tenants.get(lead.tenant_id) if lead.tenant_id else None,
+                    tenant_linked_at=lead.tenant_linked_at,
+                    is_prospect=lead.id in prospects,
                     created_at=lead.created_at,
                     updated_at=lead.updated_at,
                 )
@@ -254,6 +276,8 @@ class CrmService:
         property_id: uuid.UUID | None = None,
         created_from: date | None = None,
         created_to: date | None = None,
+        prospect: bool | None = None,
+        tenant_id: uuid.UUID | None = None,
     ) -> tuple[list[LeadRead], int]:
         if created_from and created_to and created_to < created_from:
             raise BadRequestError("created_to cannot be before created_from.")
@@ -263,9 +287,13 @@ class CrmService:
             (Lead.source, source),
             (Lead.owner_id, owner_id),
             (Lead.property_id, property_id),
+            (Lead.tenant_id, tenant_id),
         ):
             if value is not None:
                 statement = statement.where(column == value)
+        if prospect is not None:
+            clause = is_prospect_clause(Lead.id)
+            statement = statement.where(clause if prospect else ~clause)
         if created_from:
             statement = statement.where(Lead.created_at >= _day_start(created_from))
         if created_to:
@@ -642,6 +670,110 @@ class CrmService:
         self._log("task_deleted", lead, f'Lead {lead.reference}: follow-up "{task.title}" deleted.')
         self.session.delete(task)
         commit(self.session)
+
+    # --- tenant link (Phase 4A) -------------------------------------------------------------
+
+    def _tenant_log(self, action: str, tenant: Tenant, message: str) -> None:
+        log_activity(
+            self.session,
+            self.actor,
+            action=action,
+            entity_type="tenants",
+            entity_id=tenant.id,
+            property_id=None,
+            message=message[:500],
+        )
+
+    def _linkable(self, lead_id: uuid.UUID) -> Lead:
+        """The lead, locked, refusing when it is already linked (so retries and double
+        clicks never link twice or create a second tenant)."""
+        lead = self._lead(lead_id, lock=True)
+        if lead.tenant_id is not None:
+            tenant = self.session.get(Tenant, lead.tenant_id)
+            name = tenant.name if tenant else "unknown"
+            raise ConflictError(
+                f'Lead {lead.reference} is already linked to tenant "{name}". '
+                "Unlink it first to link another tenant."
+            )
+        return lead
+
+    def _link(self, lead: Lead, tenant: Tenant, how: str) -> LeadRead:
+        lead.tenant_id = tenant.id
+        lead.tenant_linked_at = datetime.now(UTC)
+        lead.tenant_linked_by = self.actor.id
+        lead.updated_by = self.actor.id
+        self._log(
+            "tenant_linked", lead, f'Lead {lead.reference} linked to tenant "{tenant.name}"{how}.'
+        )
+        self._tenant_log(
+            "lead_linked", tenant, f'Tenant "{tenant.name}" linked to lead {lead.reference}{how}.'
+        )
+        commit(self.session)
+        return self.get(lead.id)
+
+    def link_tenant(self, lead_id: uuid.UUID, tenant_id: uuid.UUID) -> LeadRead:
+        lead = self._linkable(lead_id)
+        tenant = self.session.get(Tenant, tenant_id)
+        if tenant is None:
+            raise NotFoundError("Tenant not found.")
+        if tenant.archived_at is not None:
+            raise BadRequestError("The tenant is archived. Choose another tenant.")
+        return self._link(lead, tenant, "")
+
+    def create_tenant_from_lead(
+        self, lead_id: uuid.UUID, values: dict[str, Any], *, confirmed: bool
+    ) -> LeadRead:
+        """One transaction: the tenant is created and linked, or nothing is. Possible
+        matches (the same matching as everywhere else) need explicit confirmation."""
+        lead = self._linkable(lead_id)
+        if values.get("email") is not None:
+            values["email"] = str(values["email"])
+        matches = self.check_duplicates(
+            contact_email=values.get("email"),
+            contact_phone=values.get("phone"),
+            company_name=values.get("company_name"),
+            include_leads=False,
+        )
+        if matches and not confirmed:
+            raise ConflictError(
+                f"{len(matches)} existing tenant(s) may be the same. Link one of them, or "
+                "confirm that none is the same tenant to create a new one.",
+                conflicts=[m.model_dump(mode="json") for m in matches],
+            )
+        tenant = Tenant(**values)
+        self.session.add(tenant)
+        flush(self.session)
+        self._tenant_log(
+            "created", tenant, f'Tenant "{tenant.name}" was created from lead {lead.reference}.'
+        )
+        how = " (new tenant, created despite possible matches)" if matches else " (new tenant)"
+        return self._link(lead, tenant, how)
+
+    def unlink_tenant(self, lead_id: uuid.UUID, reason: str) -> LeadRead:
+        lead = self._lead(lead_id, lock=True)
+        reason = reason.strip()
+        if not reason:
+            raise BadRequestError("Give a reason for unlinking.")
+        if lead.tenant_id is None:
+            raise ConflictError(f"Lead {lead.reference} is not linked to a tenant.")
+        tenant = self.session.get(Tenant, lead.tenant_id)
+        assert tenant is not None  # the foreign key keeps it
+        lead.tenant_id = None
+        lead.tenant_linked_at = None
+        lead.tenant_linked_by = None
+        lead.updated_by = self.actor.id
+        self._log(
+            "tenant_unlinked",
+            lead,
+            f'Lead {lead.reference} unlinked from tenant "{tenant.name}". Reason: {reason}',
+        )
+        self._tenant_log(
+            "lead_unlinked",
+            tenant,
+            f'Tenant "{tenant.name}" unlinked from lead {lead.reference}. Reason: {reason}',
+        )
+        commit(self.session)
+        return self.get(lead.id)
 
     # --- duplicates -------------------------------------------------------------------------
 

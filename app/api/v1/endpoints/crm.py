@@ -1,6 +1,8 @@
 """CRM core (Phase 3A): leads, interests, notes, follow-up tasks, duplicate warnings.
+Phase 4A: proposals, and linking a lead to a tenant record.
 
-Admin only. Nothing here converts a lead to a tenant, holds inventory or sends messages.
+Admin only. Nothing here creates a contract, allocation, booking or account, holds
+inventory or sends messages.
 """
 
 import json
@@ -26,19 +28,35 @@ from app.schemas.crm import (
     NoteCreate,
     NoteRead,
     OwnerRead,
+    ProposalAccept,
+    ProposalClose,
+    ProposalCreate,
+    ProposalRead,
+    ProposalUpdate,
     StageChange,
     TaskCreate,
     TaskRead,
     TaskUpdate,
+    TenantFromLead,
+    TenantLink,
+    TenantUnlink,
 )
 from app.schemas.lead_import import ImportBatchRead, ImportBatchSummary, ImportPreview
 from app.services.crm import CrmService
 from app.services.lead_import_files import MAX_FILE_BYTES, template
 from app.services.lead_imports import LeadImportService
+from app.services.proposals import ProposalService
 
 router = APIRouter(prefix="/crm", tags=["CRM"], responses=PROTECTED)
 BAD = {400: _error("The request breaks a CRM rule (owner, property, space or values).")}
 STAGE = {409: _error("Stages move forward one at a time; later stages come from contracts.")}
+STEP = {409: _error("Not possible in the proposal's current status.")}
+LINK = {
+    409: _error(
+        "Already linked; or, for a new tenant, possible matches need confirmation (listed in "
+        "`conflicts`)."
+    )
+}
 
 
 @router.get("/leads", response_model=Page[LeadRead], summary="List leads")
@@ -52,9 +70,13 @@ def list_leads(
     property_id: uuid.UUID | None = None,
     created_from: date | None = None,
     created_to: date | None = None,
+    prospect: bool | None = None,
+    tenant_id: uuid.UUID | None = None,
 ) -> Page[LeadRead]:
     """Newest first. `search` matches reference, company, contact name, email and phone.
-    Dates are calendar days in the business time zone, both included."""
+    Dates are calendar days in the business time zone, both included. `prospect`: leads
+    with (true) or without (false) a proposal that is not withdrawn. `tenant_id`: leads
+    linked to that tenant."""
     items, total = CrmService(session, admin).leads(
         query,
         stage=stage,
@@ -63,6 +85,8 @@ def list_leads(
         property_id=property_id,
         created_from=created_from,
         created_to=created_to,
+        prospect=prospect,
+        tenant_id=tenant_id,
     )
     return Page(items=items, total=total, page=query.page, page_size=query.page_size)
 
@@ -134,6 +158,157 @@ def lead_duplicates(
     admin: CurrentAdmin, session: DbSession, lead_id: uuid.UUID
 ) -> list[DuplicateMatch]:
     return CrmService(session, admin).duplicates_of(lead_id)
+
+
+# --- lead-tenant link (Phase 4A) ------------------------------------------------------------
+
+
+@router.post(
+    "/leads/{lead_id}/tenant",
+    response_model=LeadRead,
+    responses={**NOT_FOUND, **BAD, **LINK},
+    summary="Link a lead to an existing tenant",
+)
+def link_tenant(
+    admin: CurrentAdmin, session: DbSession, lead_id: uuid.UUID, body: TenantLink
+) -> LeadRead:
+    """The lead and its history are kept. Gives no client-app access and creates no
+    contract or account. A lead already linked is refused: unlink it first."""
+    return CrmService(session, admin).link_tenant(lead_id, body.tenant_id)
+
+
+@router.post(
+    "/leads/{lead_id}/tenant/new",
+    response_model=LeadRead,
+    status_code=201,
+    responses={**NOT_FOUND, **BAD, **LINK},
+    summary="Create a tenant from a lead and link it",
+)
+def create_tenant_from_lead(
+    admin: CurrentAdmin, session: DbSession, lead_id: uuid.UUID, body: TenantFromLead
+) -> LeadRead:
+    """One step: the tenant is created and linked, or nothing is. If existing tenants may
+    be the same (email, phone or company), the answer is 409 with them in `conflicts`
+    unless `confirm_despite_matches` is true."""
+    values = body.model_dump(exclude={"confirm_despite_matches"})
+    return CrmService(session, admin).create_tenant_from_lead(
+        lead_id, values, confirmed=body.confirm_despite_matches
+    )
+
+
+@router.post(
+    "/leads/{lead_id}/tenant/unlink",
+    response_model=LeadRead,
+    responses={**NOT_FOUND, **BAD, **LINK},
+    summary="Unlink a lead from its tenant",
+)
+def unlink_tenant(
+    admin: CurrentAdmin, session: DbSession, lead_id: uuid.UUID, body: TenantUnlink
+) -> LeadRead:
+    """Needs a reason, recorded in the lead's and the tenant's history. Nothing else
+    changes."""
+    return CrmService(session, admin).unlink_tenant(lead_id, body.reason)
+
+
+# --- proposals (Phase 4A) ------------------------------------------------------------------
+
+
+@router.get(
+    "/leads/{lead_id}/proposals",
+    response_model=list[ProposalRead],
+    responses=NOT_FOUND,
+    summary="A lead's proposals, newest first",
+)
+def list_proposals(
+    admin: CurrentAdmin, session: DbSession, lead_id: uuid.UUID
+) -> list[ProposalRead]:
+    return ProposalService(session, admin).for_lead(lead_id)
+
+
+@router.post(
+    "/leads/{lead_id}/proposals",
+    response_model=ProposalRead,
+    status_code=201,
+    responses={**NOT_FOUND, **BAD},
+    summary="Make a proposal (a draft)",
+)
+def create_proposal(
+    admin: CurrentAdmin, session: DbSession, lead_id: uuid.UUID, body: ProposalCreate
+) -> ProposalRead:
+    """At any lead stage. Holds no space and creates no contract."""
+    return ProposalService(session, admin).create(lead_id, body.model_dump())
+
+
+@router.get(
+    "/proposals/{proposal_id}",
+    response_model=ProposalRead,
+    responses=NOT_FOUND,
+    summary="A proposal",
+)
+def get_proposal(admin: CurrentAdmin, session: DbSession, proposal_id: uuid.UUID) -> ProposalRead:
+    return ProposalService(session, admin).get(proposal_id)
+
+
+@router.patch(
+    "/proposals/{proposal_id}",
+    response_model=ProposalRead,
+    responses={**NOT_FOUND, **BAD, **STEP},
+    summary="Edit a draft proposal",
+)
+def update_proposal(
+    admin: CurrentAdmin, session: DbSession, proposal_id: uuid.UUID, body: ProposalUpdate
+) -> ProposalRead:
+    """Only a draft. A sent proposal is revised by making a new one."""
+    return ProposalService(session, admin).update(proposal_id, body.model_dump(exclude_unset=True))
+
+
+@router.post(
+    "/proposals/{proposal_id}/send",
+    response_model=ProposalRead,
+    responses={**NOT_FOUND, **STEP},
+    summary="Mark a draft as sent",
+)
+def send_proposal(admin: CurrentAdmin, session: DbSession, proposal_id: uuid.UUID) -> ProposalRead:
+    """Records that it was given to the lead. Nothing is emailed."""
+    return ProposalService(session, admin).send(proposal_id)
+
+
+@router.post(
+    "/proposals/{proposal_id}/accept",
+    response_model=ProposalRead,
+    responses={**NOT_FOUND, **BAD, **STEP},
+    summary="Record the lead's acceptance",
+)
+def accept_proposal(
+    admin: CurrentAdmin, session: DbSession, proposal_id: uuid.UUID, body: ProposalAccept
+) -> ProposalRead:
+    """A sent proposal only, with the date and how it was accepted. At most one accepted
+    proposal per lead. Creates no contract, allocation, booking or tenant."""
+    return ProposalService(session, admin).accept(proposal_id, body.model_dump())
+
+
+@router.post(
+    "/proposals/{proposal_id}/reject",
+    response_model=ProposalRead,
+    responses={**NOT_FOUND, **STEP},
+    summary="Record that the lead declined",
+)
+def reject_proposal(
+    admin: CurrentAdmin, session: DbSession, proposal_id: uuid.UUID, body: ProposalClose
+) -> ProposalRead:
+    return ProposalService(session, admin).reject(proposal_id, body.reason)
+
+
+@router.post(
+    "/proposals/{proposal_id}/withdraw",
+    response_model=ProposalRead,
+    responses={**NOT_FOUND, **STEP},
+    summary="Withdraw a draft or sent proposal",
+)
+def withdraw_proposal(
+    admin: CurrentAdmin, session: DbSession, proposal_id: uuid.UUID, body: ProposalClose
+) -> ProposalRead:
+    return ProposalService(session, admin).withdraw(proposal_id, body.reason)
 
 
 @router.get(

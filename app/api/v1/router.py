@@ -23,6 +23,7 @@ from app.api.v1.endpoints import (
     auth,
     bookings,
     buildings,
+    company_profiles,
     contracts,
     crm,
     customer,
@@ -57,6 +58,7 @@ ADMIN_ROUTERS = (
     files.router,
     contracts.router,
     agreements.router,
+    company_profiles.router,
     pricing.router,
     pricing.property_router,
     pricing.profile_router,
@@ -82,8 +84,22 @@ for router in ADMIN_ROUTERS:
 legacy_api.include_router(public.router)
 legacy_api.include_router(customer.router, prefix="/customer")
 
+# The URL shape chosen on 3 Nov 2026, mounted by app.main: /admin/api/v1/... for the admin
+# app and /client/api/v1/... for the client app. These are the documented paths.
+admin_root = APIRouter()
+for router in ADMIN_ROUTERS:
+    admin_root.include_router(router, tags=["Admin"])
+
+client_root = APIRouter()
+client_root.include_router(auth.router, tags=["Client"])
+client_root.include_router(public.router, tags=["Client"])
+client_root.include_router(customer.router, tags=["Client"])
+
+# Under /api/v1: the health checks (documented), and the earlier /api/v1/admin/...,
+# /api/v1/client/... and unprefixed paths. Same handlers, still answering so existing apps
+# keep working, but hidden from the docs.
 api_router = APIRouter()
 api_router.include_router(health.router)
-api_router.include_router(admin_api)
-api_router.include_router(client_api)
+api_router.include_router(admin_api, include_in_schema=False)
+api_router.include_router(client_api, include_in_schema=False)
 api_router.include_router(legacy_api)

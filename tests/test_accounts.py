@@ -7,7 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import Account, ActivityLog
-from tests.test_agreements import make_docx, storage, upload  # noqa: F401
+from tests.test_agreements import make_docx, sign_with_copy, storage, upload  # noqa: F401
 from tests.test_client_access import agreement, contract_for, new_tenant
 from tests.test_client_api import hub, priya  # noqa: F401
 from tests.test_resources import V1
@@ -33,7 +33,7 @@ def test_one_account_per_tenant_with_a_completed_contract(
     assert api.get(f"{ADMIN}/accounts").json()["total"] == 0
     assert api.get(f"{ADMIN}/accounts/by-tenant/{tenant['id']}").json() == {"account_id": None}
     document = api.get(f"{ADMIN}/contracts/{contract['id']}/agreement").json()["documents"][0]
-    assert api.post(f"{ADMIN}/contract-documents/{document['id']}/sign").status_code == 200
+    sign_with_copy(api, document["id"])
 
     for _ in range(3):  # reading again never opens a second account
         listed = api.get(f"{ADMIN}/accounts").json()

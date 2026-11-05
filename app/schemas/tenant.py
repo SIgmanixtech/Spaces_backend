@@ -2,13 +2,61 @@ import uuid
 from datetime import date, datetime
 from typing import ClassVar, Literal, Self
 
-from pydantic import EmailStr, Field, model_validator
+from pydantic import EmailStr, Field, field_validator, model_validator
 
 from app.models.enums import OccupancyStatus, TenantStatus
 from app.schemas.common import InputSchema, ReadSchema, UpdateSchema
 
+# Formats only (Phase 4A); no other legal rule is assumed. The GSTIN and PAN patterns are the
+# ones the agreement form already uses (app/services/agreements.py); CIN is the standard
+# 21-character company identification number.
+GSTIN_PATTERN = r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$"
+PAN_PATTERN = r"^[A-Z]{5}[0-9]{4}[A-Z]$"
+CIN_PATTERN = r"^[LU][0-9]{5}[A-Z]{2}[0-9]{4}[A-Z]{3}[0-9]{6}$"
+LEGAL_FIELDS = (
+    "registered_address",
+    "signatory_name",
+    "signatory_designation",
+    "signatory_address",
+    "gstin",
+    "pan",
+    "cin",
+)
 
-class TenantCreate(InputSchema):
+
+class TenantLegal(InputSchema):
+    """Legal and signatory details, all optional. Blank text is saved as empty (null);
+    GSTIN, PAN and CIN are trimmed and uppercased before their format is checked."""
+
+    registered_address: str | None = Field(default=None, max_length=500)
+    signatory_name: str | None = Field(default=None, max_length=200)
+    signatory_designation: str | None = Field(default=None, max_length=120)
+    signatory_address: str | None = Field(
+        default=None, max_length=500, description="Only if different from the registered one."
+    )
+    gstin: str | None = Field(
+        default=None, pattern=GSTIN_PATTERN, description="e.g. 36ABCDE1234F1Z5"
+    )
+    pan: str | None = Field(default=None, pattern=PAN_PATTERN, description="e.g. ABCDE1234F")
+    cin: str | None = Field(
+        default=None, pattern=CIN_PATTERN, description="21 characters, e.g. U72200TG2015PTC123456"
+    )
+
+    @field_validator(*LEGAL_FIELDS, mode="before")
+    @classmethod
+    def _tidy(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = value.strip()
+            return value or None
+        return value
+
+    @field_validator("gstin", "pan", "cin", mode="before")
+    @classmethod
+    def _upper(cls, value: object) -> object:
+        return value.upper() if isinstance(value, str) else value
+
+
+class TenantCreate(TenantLegal):
     name: str = Field(min_length=1, max_length=200)
     company_name: str | None = Field(default=None, max_length=200)
     email: EmailStr | None = None
@@ -17,7 +65,7 @@ class TenantCreate(InputSchema):
     notes: str | None = None
 
 
-class TenantUpdate(UpdateSchema):
+class TenantUpdate(TenantLegal, UpdateSchema):
     required_fields: ClassVar[frozenset[str]] = frozenset({"name", "status"})
 
     name: str | None = Field(default=None, min_length=1, max_length=200)
@@ -56,6 +104,13 @@ class TenantRead(ReadSchema):
         default=None,
         description="Why the tenant cannot be invited yet (no email, no completed contract).",
     )
+    registered_address: str | None = None
+    signatory_name: str | None = None
+    signatory_designation: str | None = None
+    signatory_address: str | None = None
+    gstin: str | None = None
+    pan: str | None = None
+    cin: str | None = None
     archived_at: datetime | None
     created_at: datetime
     updated_at: datetime

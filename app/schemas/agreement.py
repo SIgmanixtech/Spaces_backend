@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal
 
 from pydantic import Field
@@ -22,6 +22,10 @@ class TemplateRead(ReadSchema):
         default_factory=list, description="Placeholders the system cannot fill; block approval."
     )
     required_fields: list[str]
+    custom_fields: list["CustomField"] = Field(default_factory=list)
+    unused_custom_fields: list[str] = Field(
+        default_factory=list, description="Custom fields the document never uses."
+    )
     notes: str | None
     uploaded_by: uuid.UUID | None
     approved_by: uuid.UUID | None
@@ -93,4 +97,93 @@ class FieldCatalogue(ReadSchema):
     customer_fields: list[AgreementField]
     placeholders: dict[ContractType, dict[str, str]] = Field(
         description="Every placeholder a template of each type may use, with its meaning."
+    )
+
+
+# --- Phase 4B (administrators only) -----------------------------------------------------------
+
+
+class CustomField(ReadSchema):
+    key: str
+    label: str
+    type: Literal["text", "number", "date"]
+    required: bool
+
+
+class CustomFieldsInput(InputSchema):
+    custom_fields: list[CustomField] = Field(max_length=50)
+
+
+class CustomFieldValue(CustomField):
+    value: str | None
+
+
+class Signer(InputSchema):
+    party: Literal["TENANT", "COMPANY"]
+    name: str = Field(min_length=1, max_length=200)
+    designation: str | None = Field(default=None, max_length=120)
+
+
+class SignedCopyRead(ReadSchema):
+    """A scan of the agreement signed on paper: evidence of a paper signature, not a
+    verified digital signature."""
+
+    id: uuid.UUID
+    source: str
+    file_name: str
+    size_bytes: int
+    sha256: str
+    signed_on: date
+    signers: list[Signer]
+    notes: str | None
+    uploaded_by: uuid.UUID | None
+    created_at: datetime
+    replaced_at: datetime | None
+    replace_reason: str | None
+
+
+class AdminDocumentRead(DocumentRead):
+    values: dict[str, object] = Field(
+        default_factory=dict,
+        description="Every value the document was made with (a snapshot; later record "
+        "edits do not change it).",
+    )
+    signed_copy: SignedCopyRead | None = Field(
+        default=None, description="The current signed copy, if one was uploaded."
+    )
+    signed_without_copy: bool = Field(
+        default=False, description="Signed before copies were kept: no copy uploaded."
+    )
+
+
+class CompanySummary(ReadSchema):
+    id: uuid.UUID
+    legal_name: str
+
+
+class AdminAgreementRead(AgreementRead):
+    documents: list[AdminDocumentRead]  # type: ignore[assignment]
+    lifecycle: str = Field(description="Draft, Generated, Ready for signing, ... (labels).")
+    custom_fields: list[CustomFieldValue]
+    other_charges: str | None
+    proposal_id: uuid.UUID | None
+    proposal_reference: str | None
+    company_profile: CompanySummary | None
+
+
+class PrefillRow(ReadSchema):
+    key: str
+    label: str
+    current: str | None
+    source: str | None = Field(description="From the tenant's record.")
+    differs: bool
+
+
+class PrefillApply(InputSchema):
+    keys: list[str] = Field(min_length=1, max_length=20)
+
+
+class ContractFieldsInput(InputSchema):
+    values: dict[str, str | None] = Field(
+        description="The template's own fields by key, and other_charges."
     )

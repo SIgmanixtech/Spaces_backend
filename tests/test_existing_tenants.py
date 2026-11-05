@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.models import Tenant
 from app.services.client_access import completed_contract_ids, has_completed_contract
-from tests.test_agreements import make_docx, storage, upload  # noqa: F401
+from tests.test_agreements import make_docx, sign_with_copy, storage, upload  # noqa: F401
 from tests.test_client_access import agreement, contract_for, invites, new_tenant  # noqa: F401
 from tests.test_client_api import hub, priya  # noqa: F401
 from tests.test_resources import V1
@@ -104,7 +104,7 @@ def test_tenant_contracts_show_agreement_status_and_completion(
     blocker = api.get(f"{ADMIN}/tenants/{tenant['id']}").json()["client_access_blocker"]
     assert "no completed contract" in blocker
     document = api.get(f"{ADMIN}/contracts/{contract['id']}/agreement").json()["documents"][0]
-    assert api.post(f"{ADMIN}/contract-documents/{document['id']}/sign").status_code == 200
+    sign_with_copy(api, document["id"])
     assert (mine()[0]["agreement_status"], mine()[0]["completes_contract"]) == ("SIGNED", True)
     assert api.get(f"{ADMIN}/tenants/{tenant['id']}").json()["client_access_blocker"] is None
     # The per-contract flag and the invitation rule are the same rule (BR-025).

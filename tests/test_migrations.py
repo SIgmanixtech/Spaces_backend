@@ -1348,3 +1348,114 @@ def test_0018_downgrade_refuses_while_parking_slots_exist(migrations: Config) ->
     command.downgrade(migrations, "0017")
     dispose_engine()
     assert current_revision() == "0017"
+
+
+def test_revision_0019_renders_as_sql_without_a_database(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command.upgrade(alembic_config(), "0018:0019", sql=True)
+    upgrade = capsys.readouterr().out
+    assert "CREATE TABLE proposals" in upgrade and "CREATE TABLE proposal_spaces" in upgrade
+    assert "CREATE UNIQUE INDEX uq_proposals_accepted_lead" in upgrade
+    for column in ("registered_address", "signatory_name", "gstin", "pan", "cin"):
+        assert f"ALTER TABLE tenants ADD COLUMN {column}" in upgrade
+    assert "ALTER TABLE leads ADD COLUMN tenant_id UUID" in upgrade
+    assert "aadhaar" not in upgrade.lower()
+    # Additive: no existing row is changed and no existing column is altered or dropped.
+    statements = [
+        line for line in upgrade.splitlines() if line.startswith(("INSERT", "UPDATE", "DELETE"))
+    ]
+    assert all("alembic_version" in line for line in statements)
+    assert "DROP" not in upgrade and "ALTER COLUMN" not in upgrade
+    command.downgrade(alembic_config(), "0019:0018", sql=True)
+    downgrade = capsys.readouterr().out
+    assert downgrade.index("Cannot downgrade past 0019") < downgrade.index("DROP TABLE proposals")
+
+
+def test_0019_downgrade_refuses_to_discard_proposals_links_or_legal_details(
+    migrations: Config,
+) -> None:
+    head = ScriptDirectory.from_config(migrations).get_current_head()
+    with get_engine().begin() as connection:
+        tenant = connection.execute(
+            text(
+                "INSERT INTO tenants (name, gstin) VALUES ('Acme', '36ABCDE1234F1Z5') RETURNING id"
+            )
+        ).scalar_one()
+    with pytest.raises(DBAPIError, match="Cannot downgrade past 0019: 0 proposal"):
+        command.downgrade(migrations, "0018")
+    dispose_engine()
+    assert current_revision() == head
+    with get_engine().begin() as connection:
+        connection.execute(text("UPDATE tenants SET gstin = NULL WHERE id = :t"), {"t": tenant})
+        connection.execute(
+            text(
+                "INSERT INTO leads (source, company_name, tenant_id) VALUES ('MANUAL', 'Acme', :t)"
+            ),
+            {"t": tenant},
+        )
+    with pytest.raises(DBAPIError, match="1 lead-tenant link"):
+        command.downgrade(migrations, "0018")
+    dispose_engine()
+    assert current_revision() == head
+    with get_engine().begin() as connection:
+        connection.execute(text("UPDATE leads SET tenant_id = NULL"))
+    command.downgrade(migrations, "0018")
+    dispose_engine()
+    assert current_revision() == "0018"
+
+
+def test_revision_0020_renders_as_sql_without_a_database(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command.upgrade(alembic_config(), "0019:0020", sql=True)
+    upgrade = capsys.readouterr().out
+    assert "CREATE TABLE company_profiles" in upgrade
+    assert "CREATE TABLE contract_signed_copies" in upgrade
+    assert "CREATE UNIQUE INDEX uq_contract_signed_copies_current" in upgrade
+    assert "ALTER TABLE properties ADD COLUMN company_profile_id UUID" in upgrade
+    assert "ALTER TABLE tenant_occupancies ADD COLUMN proposal_id UUID" in upgrade
+    assert "contract_fields JSONB DEFAULT '{}'::jsonb NOT NULL" in upgrade
+    assert "custom_fields JSONB DEFAULT '[]'::jsonb NOT NULL" in upgrade
+    assert "aadhaar" not in upgrade.lower()
+    # Additive: no existing row is changed and nothing existing is altered or dropped.
+    statements = [
+        line for line in upgrade.splitlines() if line.startswith(("INSERT", "UPDATE", "DELETE"))
+    ]
+    assert all("alembic_version" in line for line in statements)
+    assert "DROP" not in upgrade and "ALTER COLUMN" not in upgrade
+    command.downgrade(alembic_config(), "0020:0019", sql=True)
+    downgrade = capsys.readouterr().out
+    assert downgrade.index("Cannot downgrade past 0020") < downgrade.index(
+        "DROP TABLE contract_signed_copies"
+    )
+
+
+def test_0020_downgrade_refuses_to_discard_phase_4b_data(migrations: Config) -> None:
+    head = ScriptDirectory.from_config(migrations).get_current_head()
+    with get_engine().begin() as connection:
+        connection.execute(text("INSERT INTO company_profiles (legal_name) VALUES ('Sigmanix')"))
+    with pytest.raises(DBAPIError, match="Cannot downgrade past 0020: 0 signed cop"):
+        command.downgrade(migrations, "0019")
+    dispose_engine()
+    assert current_revision() == head
+    with get_engine().begin() as connection:
+        connection.execute(text("DELETE FROM company_profiles"))
+        connection.execute(
+            text(
+                "INSERT INTO contract_templates (contract_type, name, version, status, bucket,"
+                " object_path, original_name, size_bytes, sha256, custom_fields)"
+                " VALUES ('SPACE_LEASE', 'T', 1, 'DRAFT', 'b', 'p', 't.docx', 1, :h,"
+                ' \'[{"key": "a"}]\'::jsonb)'
+            ),
+            {"h": "0" * 64},
+        )
+    with pytest.raises(DBAPIError, match="1 template"):
+        command.downgrade(migrations, "0019")
+    dispose_engine()
+    assert current_revision() == head
+    with get_engine().begin() as connection:
+        connection.execute(text("DELETE FROM contract_templates"))
+    command.downgrade(migrations, "0019")
+    dispose_engine()
+    assert current_revision() == "0019"

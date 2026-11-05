@@ -47,3 +47,8 @@ class Property(UUIDPrimaryKeyMixin, TimestampMixin, ArchivableMixin, Base):
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("app_users.id", ondelete="SET NULL")
     )
+    # The legal entity that owns the property and signs its agreements (Phase 4B). Set
+    # from the Company Profile page; several properties may share one profile.
+    company_profile_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("company_profiles.id", ondelete="RESTRICT"), index=True
+    )

@@ -1,6 +1,10 @@
 """CRM core (Phase 3A): leads, their interests, notes and follow-up tasks (BR-006, BR-008).
+Phase 4A: proposals made to a lead, and the lead's link to a tenant record.
 
-A lead is a prospective tenant. It never becomes a tenant here: conversion is Phase 5.
+A lead is a prospective tenant. Phase 4A links a lead to a tenant record (an existing one,
+or one created from the lead); that gives no client-app access and creates no contract or
+account. A lead with at least one proposal that is not withdrawn is a prospect (derived,
+not a stage).
 Duplicates are only warned about, so the normalised match keys below are indexed but not
 unique. Stages stored here are the three an administrator sets by hand; the later ones are
 read from contract and activation records when those phases exist.
@@ -24,6 +28,7 @@ from sqlalchemy import (
     Sequence,
     String,
     Text,
+    UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -35,11 +40,13 @@ from app.models.enums import (
     LeadImportFileType,
     LeadSource,
     LeadStage,
+    ProposalStatus,
     SpaceType,
 )
 from app.models.mixins import CreatedAtMixin, TimestampMixin, UUIDPrimaryKeyMixin, enum_check
 
 lead_reference_seq = Sequence("lead_reference_seq", metadata=Base.metadata)
+proposal_reference_seq = Sequence("proposal_reference_seq", metadata=Base.metadata)
 
 
 class Lead(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -107,6 +114,15 @@ class Lead(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # Set when the lead came from a spreadsheet import (Phase 3B-1); never changed after.
     import_batch_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("lead_import_batches.id", ondelete="RESTRICT"), index=True
+    )
+    # The tenant record this lead belongs to (Phase 4A). Several leads may share a tenant;
+    # a lead has at most one. A linked tenant cannot be deleted (it is archived instead).
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tenants.id", ondelete="RESTRICT"), index=True
+    )
+    tenant_linked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    tenant_linked_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("app_users.id", ondelete="SET NULL")
     )
 
 
@@ -233,3 +249,112 @@ class LeadImportBatch(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("app_users.id", ondelete="SET NULL")
     )
+
+
+class Proposal(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """A proposal made to a lead (Phase 4A): the property and spaces offered, the period and
+    the commercial terms as entered. Nothing is calculated. Accepting it records the lead's
+    acceptance only: no contract, allocation, booking or tenant is created and no space is
+    held. Every proposal is kept; a revision is a new proposal."""
+
+    __tablename__ = "proposals"
+    __table_args__ = (
+        enum_check("status", ProposalStatus),
+        CheckConstraint("end_date IS NULL OR end_date >= start_date", name="dates_ordered"),
+        CheckConstraint(
+            "valid_until IS NULL OR valid_until >= proposal_date", name="validity_ordered"
+        ),
+        CheckConstraint(
+            "(monthly_rent IS NULL OR monthly_rent >= 0)"
+            " AND (security_deposit IS NULL OR security_deposit >= 0)",
+            name="amounts_not_negative",
+        ),
+        CheckConstraint("currency ~ '^[A-Z]{3}$'", name="currency_code"),
+        CheckConstraint(
+            "(status = 'ACCEPTED') = (accepted_on IS NOT NULL AND acceptance_note IS NOT NULL"
+            " AND accepted_at IS NOT NULL)",
+            name="acceptance_recorded",
+        ),
+        CheckConstraint(
+            "(status = 'REJECTED') = (rejected_at IS NOT NULL)", name="rejection_recorded"
+        ),
+        CheckConstraint(
+            "(status = 'WITHDRAWN') = (withdrawn_at IS NOT NULL)", name="withdrawal_recorded"
+        ),
+        # Lets proposal_spaces require spaces of the proposal's own property.
+        UniqueConstraint("id", "property_id", name="uq_proposals_id_property"),
+        # At most one accepted proposal per lead.
+        Index(
+            "uq_proposals_accepted_lead",
+            "lead_id",
+            unique=True,
+            postgresql_where=text("status = 'ACCEPTED'"),
+        ),
+    )
+
+    reference: Mapped[str] = mapped_column(
+        String(20),
+        unique=True,
+        nullable=False,
+        server_default=text(
+            "('PR-' || to_char(now(), 'YYYY') || '-' "
+            "|| lpad(nextval('proposal_reference_seq')::text, 6, '0'))"
+        ),
+    )
+    lead_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("leads.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    property_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("properties.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=ProposalStatus.DRAFT.value, index=True
+    )
+    proposal_date: Mapped[date] = mapped_column(Date, nullable=False)
+    valid_until: Mapped[date | None] = mapped_column(Date)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date | None] = mapped_column(Date)
+    monthly_rent: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    security_deposit: Mapped[Decimal | None] = mapped_column(Numeric(12, 2))
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, server_default="INR")
+    other_charges: Mapped[str | None] = mapped_column(Text)
+    commercial_terms: Mapped[str | None] = mapped_column(Text)
+    notes: Mapped[str | None] = mapped_column(Text)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    accepted_on: Mapped[date | None] = mapped_column(Date)
+    acceptance_note: Mapped[str | None] = mapped_column(Text)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    accepted_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("app_users.id", ondelete="SET NULL")
+    )
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    withdrawn_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closing_reason: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("app_users.id", ondelete="SET NULL")
+    )
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("app_users.id", ondelete="SET NULL")
+    )
+
+
+class ProposalSpace(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
+    """A space offered in a proposal; it must belong to the proposal's property. Building
+    and floor are read from the space. Holds no inventory."""
+
+    __tablename__ = "proposal_spaces"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["proposal_id", "property_id"],
+            ["proposals.id", "proposals.property_id"],
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["space_id", "property_id"], ["spaces.id", "spaces.property_id"], ondelete="RESTRICT"
+        ),
+        UniqueConstraint("proposal_id", "space_id", name="uq_proposal_spaces_proposal_space"),
+    )
+
+    proposal_id: Mapped[uuid.UUID] = mapped_column(nullable=False, index=True)
+    property_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    space_id: Mapped[uuid.UUID] = mapped_column(nullable=False, index=True)

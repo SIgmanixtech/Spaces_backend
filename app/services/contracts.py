@@ -231,6 +231,91 @@ class ContractService:
         commit(self.session)
         return self.get(contract.id)
 
+    def create_from_proposal(self, proposal_id: uuid.UUID) -> ContractRead:
+        """A PENDING contract from an accepted proposal (Phase 4B), for the tenant its lead
+        is linked to. Copies the property, spaces, dates, rent, deposit, terms and other
+        charges, and links the proposal. Several spaces become one contract group (one
+        row per space); the proposal's rent and deposit are totals, so they go on the
+        first row and the other rows carry no rent of their own. Holds nothing: no
+        booking, allocation or activation, and no tenant is created."""
+        from app.models.crm import Lead, Proposal, ProposalSpace
+        from app.models.enums import ProposalStatus
+
+        proposal = self.session.scalar(
+            select(Proposal).where(Proposal.id == proposal_id).with_for_update()
+        )
+        if proposal is None:
+            raise NotFoundError("Proposal not found.")
+        if proposal.status != ProposalStatus.ACCEPTED:
+            raise ConflictError(
+                f"Only an accepted proposal becomes a contract; {proposal.reference} is "
+                f"{proposal.status.lower()}."
+            )
+        lead = self.session.get(Lead, proposal.lead_id)
+        if lead is None or lead.tenant_id is None:
+            raise ConflictError(
+                "Link the lead to a tenant first (CRM, lead page); no tenant is created here."
+            )
+        existing = self.session.scalar(
+            select(TenantOccupancy.reference).where(
+                TenantOccupancy.proposal_id == proposal.id,
+                TenantOccupancy.status != ContractStatus.CANCELLED,
+            )
+        )
+        if existing:
+            raise ConflictError(
+                f"Contract {existing} was already made from {proposal.reference}. Cancel it "
+                "first to make another."
+            )
+        tenant = require(self.session, Tenant, lead.tenant_id, "Tenant")
+        prop = require(self.session, Property, proposal.property_id, "Property")
+        space_ids = list(
+            self.session.scalars(
+                select(ProposalSpace.space_id)
+                .where(ProposalSpace.proposal_id == proposal.id)
+                .order_by(ProposalSpace.created_at, ProposalSpace.id)
+            )
+        )
+        for space_id in space_ids:
+            self._space(prop.id, space_id)
+        group_id = uuid.uuid4() if len(space_ids) > 1 else None
+        fields = {"other_charges": proposal.other_charges} if proposal.other_charges else {}
+        made: list[TenantOccupancy] = []
+        for i, space_id in enumerate(space_ids or [None]):
+            first = i == 0
+            contract = TenantOccupancy(
+                tenant_id=tenant.id,
+                property_id=prop.id,
+                space_id=space_id,
+                group_id=group_id,
+                proposal_id=proposal.id,
+                start_date=proposal.start_date,
+                end_date=proposal.end_date,
+                monthly_rent=proposal.monthly_rent
+                if first
+                else (0 if proposal.monthly_rent is not None else None),
+                security_deposit=proposal.security_deposit if first else None,
+                currency=proposal.currency,
+                terms=proposal.commercial_terms,
+                contract_fields=fields,
+                notes=f"Made from proposal {proposal.reference}"
+                + (f" (one of {len(space_ids)} spaces)." if group_id else "."),
+                status=ContractStatus.PENDING,
+                created_by=self.actor.id if self.actor else None,
+            )
+            self._check_order(contract)
+            self.session.add(contract)
+            flush(self.session)
+            self.session.refresh(contract, ["reference"])
+            self._log(
+                "created",
+                contract,
+                f'for tenant "{tenant.name}" at "{prop.name}" from proposal {proposal.reference}',
+            )
+            made.append(contract)
+        commit(self.session)
+        return self.get(made[0].id)
+
     def request(self, values: dict[str, Any]) -> TenantOccupancy:
         """A customer's contract request: PENDING, but holding its space at once. The
         property team approves it (activate) or rejects it (cancel, which frees the space)."""
@@ -623,6 +708,7 @@ class ContractService:
                     group_reference=groups[c.group_id][0] if c.group_id in groups else None,
                     group_spaces=groups[c.group_id][1] if c.group_id in groups else [],
                     agreement_status=agreements.get(c.id),
+                    proposal_id=c.proposal_id,
                     completes_contract=c.id in completed,
                 )
             )

@@ -1,4 +1,4 @@
-"""CRM core request and response bodies (Phase 3A)."""
+"""CRM core request and response bodies (Phase 3A; proposals and tenant links, Phase 4A)."""
 
 import uuid
 from datetime import date, datetime
@@ -7,8 +7,9 @@ from typing import ClassVar, Literal, Self
 
 from pydantic import EmailStr, Field, model_validator
 
-from app.models.enums import BillingPeriod, LeadSource, LeadStage, SpaceType
+from app.models.enums import BillingPeriod, LeadSource, LeadStage, ProposalStatus, SpaceType
 from app.schemas.common import InputSchema, ReadSchema, UpdateSchema
+from app.schemas.tenant import TenantCreate
 
 _Money = Field(default=None, ge=0, max_digits=12, decimal_places=2)
 _Area = Field(default=None, gt=0, max_digits=10, decimal_places=2)
@@ -97,6 +98,16 @@ class LeadRead(ReadSchema):
     next_stage: LeadStage | None = Field(description="The only stage it can move to now.")
     open_tasks: int
     overdue_tasks: int
+    tenant_id: uuid.UUID | None = Field(
+        default=None, description="The tenant record this lead is linked to (Phase 4A)."
+    )
+    tenant_name: str | None = None
+    tenant_linked_at: datetime | None = None
+    is_prospect: bool = Field(
+        default=False,
+        description="True when the lead has at least one proposal that is not withdrawn. "
+        "Derived; not a stage.",
+    )
     created_at: datetime
     updated_at: datetime
 
@@ -199,3 +210,136 @@ class OwnerRead(ReadSchema):
     id: uuid.UUID
     name: str | None
     email: str | None
+
+
+# --- proposals (Phase 4A) ------------------------------------------------------------------
+
+
+class _ProposalTerms(InputSchema):
+    proposal_date: date
+    valid_until: date | None = Field(default=None, description="Optional; not before the date.")
+    start_date: date
+    end_date: date | None = Field(default=None, description="Last day, inclusive; optional.")
+    monthly_rent: Decimal | None = _Money
+    security_deposit: Decimal | None = _Money
+    currency: str = Field(default="INR", pattern=r"^[A-Z]{3}$")
+    other_charges: str | None = Field(
+        default=None, max_length=5000, description="As entered; nothing is calculated."
+    )
+    commercial_terms: str | None = Field(
+        default=None, max_length=10000, description="As entered; nothing is calculated."
+    )
+    notes: str | None = Field(default=None, max_length=5000)
+
+
+class ProposalCreate(_ProposalTerms):
+    property_id: uuid.UUID
+    space_ids: list[uuid.UUID] = Field(
+        default_factory=list, max_length=200, description="Spaces of that property, if any."
+    )
+
+    @model_validator(mode="after")
+    def _checks(self) -> Self:
+        if self.end_date is not None and self.end_date < self.start_date:
+            raise ValueError("The end date cannot be before the start date.")
+        if self.valid_until is not None and self.valid_until < self.proposal_date:
+            raise ValueError("Valid until cannot be before the proposal date.")
+        if len(set(self.space_ids)) != len(self.space_ids):
+            raise ValueError("A space is listed twice.")
+        return self
+
+
+class ProposalUpdate(UpdateSchema):
+    """Only a draft can be edited. A sent proposal is revised by making a new one."""
+
+    required_fields: ClassVar[frozenset[str]] = frozenset(
+        {"property_id", "space_ids", "proposal_date", "start_date", "currency"}
+    )
+
+    property_id: uuid.UUID | None = None
+    space_ids: list[uuid.UUID] | None = Field(default=None, max_length=200)
+    proposal_date: date | None = None
+    valid_until: date | None = None
+    start_date: date | None = None
+    end_date: date | None = None
+    monthly_rent: Decimal | None = _Money
+    security_deposit: Decimal | None = _Money
+    currency: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
+    other_charges: str | None = Field(default=None, max_length=5000)
+    commercial_terms: str | None = Field(default=None, max_length=10000)
+    notes: str | None = Field(default=None, max_length=5000)
+
+
+class ProposalAccept(InputSchema):
+    accepted_on: date = Field(description="The day the lead accepted.")
+    acceptance_note: str = Field(
+        min_length=1,
+        max_length=2000,
+        description="How the acceptance was given, e.g. 'Email from the director'.",
+    )
+
+
+class ProposalClose(InputSchema):
+    reason: str | None = Field(default=None, max_length=2000)
+
+
+class ProposalSpaceRead(ReadSchema):
+    space_id: uuid.UUID
+    space_name: str
+    space_type: str | None
+    building_name: str | None
+    floor_name: str | None
+    archived: bool
+
+
+class ProposalRead(ReadSchema):
+    id: uuid.UUID
+    reference: str
+    lead_id: uuid.UUID
+    lead_reference: str
+    property_id: uuid.UUID
+    property_name: str
+    spaces: list[ProposalSpaceRead]
+    status: ProposalStatus
+    expired: bool = Field(description="Sent and past valid_until. Shown, never stored.")
+    proposal_date: date
+    valid_until: date | None
+    start_date: date
+    end_date: date | None
+    monthly_rent: float | None
+    security_deposit: float | None
+    currency: str
+    other_charges: str | None
+    commercial_terms: str | None
+    notes: str | None
+    sent_at: datetime | None
+    accepted_on: date | None
+    acceptance_note: str | None
+    accepted_at: datetime | None
+    accepted_by_email: str | None
+    rejected_at: datetime | None
+    withdrawn_at: datetime | None
+    closing_reason: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+# --- lead-tenant link (Phase 4A) -------------------------------------------------------------
+
+
+class TenantLink(InputSchema):
+    tenant_id: uuid.UUID
+
+
+class TenantFromLead(TenantCreate):
+    """A new tenant from the lead's details, reviewed by the admin. When the details match
+    existing tenants, set confirm_despite_matches after checking they are different."""
+
+    confirm_despite_matches: bool = Field(
+        default=False,
+        description="The admin checked the possible matches and none is the same tenant.",
+    )
+
+
+class TenantUnlink(InputSchema):
+    reason: str = Field(min_length=1, max_length=1000)

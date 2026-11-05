@@ -56,6 +56,15 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, ArchivableMixin, Base):
     # tenants can use the client app.
     client_invited_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     client_activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Legal and signatory details (Phase 4A), all optional. Admin only: never in client-app
+    # responses, and history names a changed field without its value. No Aadhaar.
+    registered_address: Mapped[str | None] = mapped_column(String(500))
+    signatory_name: Mapped[str | None] = mapped_column(String(200))
+    signatory_designation: Mapped[str | None] = mapped_column(String(120))
+    signatory_address: Mapped[str | None] = mapped_column(String(500))
+    gstin: Mapped[str | None] = mapped_column(String(15))
+    pan: Mapped[str | None] = mapped_column(String(10))
+    cin: Mapped[str | None] = mapped_column(String(21))
 
 
 class TenantOccupancy(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -152,4 +161,12 @@ class TenantOccupancy(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     termination_reason: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("app_users.id", ondelete="SET NULL")
+    )
+    # Phase 4B: the accepted proposal this contract was made from, and the values an
+    # admin entered for the template's own fields ({key: text}), plus "other_charges".
+    proposal_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("proposals.id", ondelete="RESTRICT"), index=True
+    )
+    contract_fields: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )

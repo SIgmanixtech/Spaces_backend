@@ -66,6 +66,23 @@ def storage(tmp_path: Path) -> Iterator[LocalStorage]:
     app.dependency_overrides.pop(get_storage, None)
 
 
+SIGNED_PDF = b"%PDF-1.4\n% a scan of the paper-signed agreement\n"
+
+
+def sign_with_copy(api: TestClient, document_id: str, expected: int = 201) -> dict:
+    """Record the signature the Phase 4B way: upload the signed copy (PDF)."""
+    response = api.post(
+        f"{V1}/admin/contract-documents/{document_id}/signed-copy",
+        data={
+            "signed_on": "2026-11-01",
+            "signers": '[{"party": "TENANT", "name": "Asha Rao", "designation": "Director"}]',
+        },
+        files={"file": ("signed.pdf", SIGNED_PDF, "application/pdf")},
+    )
+    assert response.status_code == expected, response.text
+    return response.json()
+
+
 def upload(
     api: TestClient,
     data: bytes,
@@ -231,9 +248,16 @@ def test_customer_details_generation_idempotence_states_and_ownership(
     for step, status in (
         ("approve", "APPROVED"),
         ("send", "SENT_FOR_SIGNATURE"),
-        ("sign", "SIGNED"),
     ):
         assert api.post(f"{doc_url}/{step}").json()["status"] == status
+    # Phase 4B: the plain sign step is retired; the signature is the uploaded signed copy.
+    retired = api.post(f"{doc_url}/sign")
+    assert retired.status_code == 409 and "signed copy" in retired.json()["detail"]
+    sign_with_copy(api, second["id"])
+    assert (
+        api.get(f"{V1}/contracts/{contract['id']}/agreement").json()["documents"][0]["status"]
+        == "SIGNED"
+    )
     # A signed agreement is never replaced or edited.
     assert priya.post(f"{url}/documents").status_code == 409
     assert priya.put(f"{url}/details", json={"values": {"legal_name": "X"}}).status_code == 409

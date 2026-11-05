@@ -17,12 +17,13 @@ for the same contract SUPERSEDES an unsigned one; a SIGNED document is never rep
 """
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 from sqlalchemy import (
     BigInteger,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -37,7 +38,12 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
 from app.models.enums import ContractType, DocumentStatus, TemplateStatus
-from app.models.mixins import TimestampMixin, UUIDPrimaryKeyMixin, enum_check
+from app.models.mixins import (
+    CreatedAtMixin,
+    TimestampMixin,
+    UUIDPrimaryKeyMixin,
+    enum_check,
+)
 
 
 class ContractTemplate(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -83,6 +89,11 @@ class ContractTemplate(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         JSONB, nullable=False, server_default=text("'[]'::jsonb")
     )
     notes: Mapped[str | None] = mapped_column(Text)
+    # Phase 4B: fields this template asks for, filled as {{ custom.<key> }}:
+    # [{"key", "label", "type": text|number|date, "required": bool}].
+    custom_fields: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
     uploaded_by: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("app_users.id", ondelete="SET NULL")
     )
@@ -130,3 +141,52 @@ class ContractDocument(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     signed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ContractSignedCopy(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
+    """A scan of the agreement signed on paper (Phase 4B): evidence of a paper signature,
+    not a verified digital signature. Uploading it marks the document SIGNED; it never
+    activates the contract. A copy is never overwritten: a replacement keeps the old copy
+    with when and why it was replaced. At most one current copy per document.
+
+    A future e-signature provider would add its own source here (`source`), leaving
+    manual uploads as they are."""
+
+    __tablename__ = "contract_signed_copies"
+    __table_args__ = (
+        CheckConstraint("source IN ('MANUAL_UPLOAD')", name="source_valid"),
+        CheckConstraint("size_bytes > 0", name="size_positive"),
+        CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name="sha256_hex"),
+        CheckConstraint(
+            "(replaced_at IS NULL) = (replace_reason IS NULL)", name="replacement_recorded"
+        ),
+        CheckConstraint("jsonb_array_length(signers) > 0", name="has_signers"),
+        Index(
+            "uq_contract_signed_copies_current",
+            "document_id",
+            unique=True,
+            postgresql_where=text("replaced_at IS NULL"),
+        ),
+    )
+
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("contract_documents.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    contract_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenant_occupancies.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    source: Mapped[str] = mapped_column(String(24), nullable=False, server_default="MANUAL_UPLOAD")
+    bucket: Mapped[str] = mapped_column(String(100), nullable=False)
+    object_path: Mapped[str] = mapped_column(String(500), nullable=False, unique=True)
+    file_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    signed_on: Mapped[date] = mapped_column(Date, nullable=False)
+    # [{"party": "TENANT" | "COMPANY", "name": ..., "designation": ...}]
+    signers: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+    uploaded_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("app_users.id", ondelete="SET NULL")
+    )
+    replaced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    replace_reason: Mapped[str | None] = mapped_column(Text)

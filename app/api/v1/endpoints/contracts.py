@@ -133,6 +133,21 @@ def update_contract(
 
 
 @router.post(
+    "/from-proposal/{proposal_id}",
+    response_model=ContractRead,
+    status_code=201,
+    responses={**NOT_FOUND, 409: _error("Not accepted, no linked tenant, or already made.")},
+    summary="Create a pending contract from an accepted proposal",
+)
+def create_from_proposal(
+    admin: CurrentAdmin, session: DbSession, proposal_id: uuid.UUID
+) -> ContractRead:
+    """For the tenant the proposal's lead is linked to. PENDING and holding nothing: no
+    booking, allocation or activation. Several spaces become one contract group."""
+    return ContractService(session, admin).create_from_proposal(proposal_id)
+
+
+@router.post(
     "/{contract_id}/activate",
     response_model=ContractRead,
     responses={**NOT_FOUND, **HELD},

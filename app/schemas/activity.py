@@ -18,7 +18,8 @@ from app.schemas.common import ReadSchema
 class ActivityActor(ReadSchema):
     id: uuid.UUID
     name: str | None
-    email: str
+    # Some users have no email (e.g. signed in by mobile number only).
+    email: str | None
     role: str
 
 

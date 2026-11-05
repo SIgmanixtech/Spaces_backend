@@ -413,7 +413,11 @@ class ActivityHistory:
             entity_types=[ActivityOption(value=t, label=entity_label(t)) for t in types],
             actions=[ActivityOption(value=a, label=action_label(a)) for a in actions],
             actors=[
-                ActivityOption(value=str(i), label=f"{n} ({e})" if n else e) for i, n, e in actors
+                ActivityOption(
+                    value=str(i),
+                    label=(f"{n} ({e})" if n and e else n or e or "User without an email"),
+                )
+                for i, n, e in actors
             ],
             properties=[ActivityOption(value=str(i), label=n) for i, n in props],
         )

@@ -63,6 +63,14 @@ class TenantService(CrudService[Tenant]):
         "phone": "phone",
         "status": "status",
         "notes": "notes",
+        # Legal details: named, never their values (Phase 4A).
+        "registered_address": "registered address",
+        "signatory_name": "signatory name",
+        "signatory_designation": "signatory designation",
+        "signatory_address": "signatory address",
+        "gstin": "GSTIN",
+        "pan": "PAN",
+        "cin": "CIN",
     }
 
     def update(self, record_id: uuid.UUID, values: dict[str, Any]) -> Tenant:

@@ -2,13 +2,22 @@
 
 from app.models.account import Account
 from app.models.activity import ActivityLog
-from app.models.agreement import ContractDocument, ContractTemplate
+from app.models.agreement import ContractDocument, ContractSignedCopy, ContractTemplate
 from app.models.allocation import Allocation, AllocationClaim
 from app.models.amenity import Amenity, PropertyAmenity
 from app.models.asset import Asset
 from app.models.booking import Booking
 from app.models.building import Building, Floor
-from app.models.crm import Lead, LeadImportBatch, LeadInterest, LeadNote, LeadTask
+from app.models.company import CompanyProfile
+from app.models.crm import (
+    Lead,
+    LeadImportBatch,
+    LeadInterest,
+    LeadNote,
+    LeadTask,
+    Proposal,
+    ProposalSpace,
+)
 from app.models.file import StoredFile
 from app.models.layout import Layout
 from app.models.meta import MetaLeadEvent, MetaLeadForm
@@ -31,7 +40,9 @@ __all__ = [
     "AppUser",
     "Asset",
     "BillingProfile",
+    "CompanyProfile",
     "ContractDocument",
+    "ContractSignedCopy",
     "ContractTemplate",
     "Booking",
     "Building",
@@ -45,6 +56,8 @@ __all__ = [
     "LeadTask",
     "MetaLeadEvent",
     "MetaLeadForm",
+    "Proposal",
+    "ProposalSpace",
     "Property",
     "PricingRule",
     "PropertyAmenity",
