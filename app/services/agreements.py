@@ -51,6 +51,7 @@ from app.models.user import AppUser
 from app.services.amount_words import rupees_in_words
 from app.services.base import commit, flush, log_activity, require
 from app.services.contracts import group_members
+from app.services.occupancy import business_today
 from app.storage import ObjectStorage, StorageError
 
 DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -940,7 +941,9 @@ class AgreementService:
             raise BadRequestError("The signed copy is larger than 20 MB.")
         if not data.startswith(b"%PDF-"):
             raise BadRequestError("Upload the signed copy as a PDF file.")
-        if signed_on > datetime.now(UTC).date():
+        # The business date (Asia/Kolkata), not UTC: early-morning IST is still "yesterday"
+        # in UTC, which would refuse a document signed today.
+        if signed_on > business_today():
             raise BadRequestError("The signing date cannot be in the future.")
         clean_signers = []
         for i, raw in enumerate(signers):
@@ -1143,7 +1146,7 @@ class AgreementService:
             "pricing.amount_words": _words(monthly_rent),  # type: ignore[arg-type]
             "pricing.deposit_words": _words(deposit),  # type: ignore[arg-type]
             "pricing.currency": contract.currency,
-            "document.generated_on": _day(datetime.now(UTC).date()),
+            "document.generated_on": _day(business_today()),  # IST date, not UTC
             "contract.other_charges": (contract.contract_fields or {}).get("other_charges"),
         }
         proposal = (

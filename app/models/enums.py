@@ -352,3 +352,39 @@ class MetaLeadStatus(StrEnum):
     RECEIVED = "RECEIVED"
     IMPORTED = "IMPORTED"
     FAILED = "FAILED"
+
+
+class ChargeCategory(StrEnum):
+    """The three charge categories (BR-009). Always separate lines; no fourth category.
+    Advances are not a category (BR-010) and security deposits are never charged here."""
+
+    SPACE_FEE = "SPACE_FEE"
+    MAINTENANCE_FEE = "MAINTENANCE_FEE"
+    REIMBURSEMENT_FEE = "REIMBURSEMENT_FEE"
+
+
+class InvoiceStatus(StrEnum):
+    """DRAFT (editable) -> ISSUED -> CANCELLED (with a reason). Paid / partly paid are
+    worked out from verified payments, never stored."""
+
+    DRAFT = "DRAFT"
+    ISSUED = "ISSUED"
+    CANCELLED = "CANCELLED"
+
+
+class PaymentStatus(StrEnum):
+    """RECORDED (entered by an admin, not counted yet) -> VERIFIED (counted, BR-019) or
+    REJECTED (with a reason)."""
+
+    RECORDED = "RECORDED"
+    VERIFIED = "VERIFIED"
+    REJECTED = "REJECTED"
+
+
+class PaymentMethod(StrEnum):
+    BANK_TRANSFER = "BANK_TRANSFER"
+    UPI = "UPI"
+    CHEQUE = "CHEQUE"
+    CASH = "CASH"
+    CARD = "CARD"
+    OTHER = "OTHER"

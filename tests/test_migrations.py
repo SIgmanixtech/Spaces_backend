@@ -1459,3 +1459,47 @@ def test_0020_downgrade_refuses_to_discard_phase_4b_data(migrations: Config) -> 
     command.downgrade(migrations, "0019")
     dispose_engine()
     assert current_revision() == "0019"
+
+
+def test_revision_0021_renders_as_sql_without_a_database(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    command.upgrade(alembic_config(), "0020:0021", sql=True)
+    upgrade = capsys.readouterr().out
+    for table in ("invoices", "invoice_lines", "payments"):
+        assert f"CREATE TABLE {table}" in upgrade
+    assert "CREATE UNIQUE INDEX uq_invoice_lines_expense" in upgrade
+    assert "CREATE UNIQUE INDEX uq_payments_external_reference" in upgrade
+    statements = [
+        line for line in upgrade.splitlines() if line.startswith(("INSERT", "UPDATE", "DELETE"))
+    ]
+    assert all("alembic_version" in line for line in statements)
+    assert "DROP" not in upgrade and "ALTER TABLE" not in upgrade
+    command.downgrade(alembic_config(), "0021:0020", sql=True)
+    downgrade = capsys.readouterr().out
+    assert downgrade.index("Cannot downgrade past 0021") < downgrade.index("DROP TABLE payments")
+
+
+def test_0021_downgrade_refuses_to_discard_invoices(migrations: Config) -> None:
+    head = ScriptDirectory.from_config(migrations).get_current_head()
+    with get_engine().begin() as connection:
+        tenant = connection.execute(
+            text("INSERT INTO tenants (name) VALUES ('Acme') RETURNING id")
+        ).scalar_one()
+        account = connection.execute(
+            text("INSERT INTO accounts (tenant_id) VALUES (:t) RETURNING id"), {"t": tenant}
+        ).scalar_one()
+        connection.execute(
+            text("INSERT INTO invoices (account_id, invoice_date) VALUES (:a, '2026-11-06')"),
+            {"a": account},
+        )
+    with pytest.raises(DBAPIError, match="Cannot downgrade past 0021: 1 invoice"):
+        command.downgrade(migrations, "0020")
+    dispose_engine()
+    assert current_revision() == head
+    with get_engine().begin() as connection:
+        connection.execute(text("DELETE FROM invoices"))
+        connection.execute(text("DELETE FROM accounts"))
+    command.downgrade(migrations, "0020")
+    dispose_engine()
+    assert current_revision() == "0020"

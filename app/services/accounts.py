@@ -50,11 +50,11 @@ from app.services.client_access import access_status, completed_contract_conditi
 from app.services.contracts import ContractService
 
 NOT_AVAILABLE_YET = [
-    "Invoices: billing frequency, generation and due dates, GST, late fees and discounts (D6) "
-    "and invoice numbers (D7) are not decided.",
-    "Payments: recording and allocating payments waits for invoices (BR-019).",
+    "Invoices are drafted and issued by an admin with amounts as entered: billing frequency, "
+    "automatic generation, due-date rules, GST, late fees and discounts (D6) are not decided, "
+    "so none is calculated.",
     "Advances: collection, application to invoices, refunds and settlement (D5) are not decided.",
-    "Account reference: the SGX-ACC format (D7) is only proposed.",
+    "References: INV-, PAY- and SGX-ACC formats (D7) are only proposed.",
 ]
 
 

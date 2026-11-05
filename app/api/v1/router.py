@@ -30,6 +30,7 @@ from app.api.v1.endpoints import (
     files,
     floors,
     health,
+    invoices,
     layouts,
     meta_leads,
     pricing,
@@ -66,6 +67,7 @@ ADMIN_ROUTERS = (
     crm.router,
     meta_leads.router,
     accounts.router,
+    invoices.router,
 )
 
 admin_api = APIRouter(prefix="/admin")

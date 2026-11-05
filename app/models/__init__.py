@@ -19,6 +19,7 @@ from app.models.crm import (
     ProposalSpace,
 )
 from app.models.file import StoredFile
+from app.models.invoice import Invoice, InvoiceLine, Payment
 from app.models.layout import Layout
 from app.models.meta import MetaLeadEvent, MetaLeadForm
 from app.models.pricing import BillingProfile, PricingRule
@@ -49,6 +50,8 @@ __all__ = [
     "Floor",
     "Layout",
     "Account",
+    "Invoice",
+    "InvoiceLine",
     "Lead",
     "LeadImportBatch",
     "LeadInterest",
@@ -58,6 +61,7 @@ __all__ = [
     "MetaLeadForm",
     "Proposal",
     "ProposalSpace",
+    "Payment",
     "Property",
     "PricingRule",
     "PropertyAmenity",
