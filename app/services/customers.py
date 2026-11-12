@@ -14,7 +14,7 @@ from calendar import monthrange
 from datetime import UTC, date, datetime
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.errors import BadRequestError, ConflictError, ForbiddenError, NotFoundError
@@ -82,35 +82,46 @@ class CustomerService:
         return tenant
 
     def profile(self) -> CustomerProfile:
-        tenant = self._own_tenant()
+        """A self-registered customer has no tenant yet: their own account details."""
+        tenant = self.tenant()
         return CustomerProfile(
             id=self.user.id,
-            email=self.user.email or tenant.email,
-            full_name=self.user.full_name or tenant.name,
-            phone=tenant.phone,
-            company_name=tenant.company_name,
+            email=self.user.email or (tenant.email if tenant else None),
+            full_name=self.user.full_name or (tenant.name if tenant else None),
+            phone=(tenant.phone if tenant else None) or self.user.phone,
+            company_name=tenant.company_name if tenant else None,
+            is_tenant=tenant is not None,
         )
 
     def update_profile(self, values: dict[str, object]) -> CustomerProfile:
-        tenant = self._own_tenant()
+        tenant = self.tenant()
         if values.get("full_name"):
             self.user.full_name = str(values["full_name"])
-            tenant.name = str(values["full_name"])
-        for field in ("phone", "company_name"):
-            if field in values:
-                setattr(tenant, field, values[field] or None)
+            if tenant:
+                tenant.name = str(values["full_name"])
+        if "phone" in values:
+            if tenant:
+                tenant.phone = values["phone"] or None  # type: ignore[assignment]
+            else:
+                self.user.phone = values["phone"] or None  # type: ignore[assignment]
+        if "company_name" in values and tenant:
+            tenant.company_name = values["company_name"] or None  # type: ignore[assignment]
         commit(self.session)
         return self.profile()
+
+    def _mine(self):  # noqa: ANN202
+        """Bookings that are this customer's: their tenant's, or ones they made themselves
+        before (or without) a tenancy."""
+        tenant = self.tenant()
+        made = and_(Booking.created_by == self.user.id, Booking.channel == BookingChannel.CUSTOMER)
+        return or_(Booking.tenant_id == tenant.id, made) if tenant else made
 
     # --- bookings ----------------------------------------------------------------
 
     def bookings(
         self, query: ListQuery, status: BookingStatus | None = None
     ) -> tuple[list[CustomerBooking], int]:
-        tenant = self.tenant()
-        if tenant is None:
-            return [], 0
-        statement = select(Booking).where(Booking.tenant_id == tenant.id)
+        statement = select(Booking).where(self._mine())
         if status is not None:
             statement = statement.where(Booking.status == status)
         total = self.session.scalar(select(func.count()).select_from(statement.subquery())) or 0
@@ -154,14 +165,17 @@ class CustomerService:
                 f"{space.name} has no {billing_period.lower().replace('_', '-')} price for those "
                 "dates, so it cannot be booked that way."
             ) from None
-        tenant = self._own_tenant()
+        tenant = self.tenant()  # None for a self-registered customer
         values = {
             "property_id": prop.id,
             "space_id": space.id,
-            "tenant_id": tenant.id,
-            "customer_name": tenant.name,
+            "tenant_id": tenant.id if tenant else None,
+            "customer_name": (tenant.name if tenant else None)
+            or self.user.full_name
+            or self.user.email
+            or "Customer",
             "customer_email": self.user.email,
-            "customer_phone": tenant.phone,
+            "customer_phone": (tenant.phone if tenant else None) or self.user.phone,
             "start_at": start_at,
             "end_at": end_at,
             "notes": notes,
@@ -302,14 +316,7 @@ class CustomerService:
         return self.booking(booking.id)
 
     def _own_booking(self, booking_id: uuid.UUID) -> Booking:
-        tenant = self.tenant()
-        booking = (
-            self.session.scalar(
-                select(Booking).where(Booking.id == booking_id, Booking.tenant_id == tenant.id)
-            )
-            if tenant
-            else None
-        )
+        booking = self.session.scalar(select(Booking).where(Booking.id == booking_id, self._mine()))
         if booking is None:
             raise NotFoundError("Booking not found.")
         return booking
@@ -375,20 +382,26 @@ class CustomerService:
 
     def dashboard(self, upcoming_limit: int = 5, activity_limit: int = 10) -> CustomerDashboard:
         tenant = self.tenant()
-        if tenant is None:
-            return CustomerDashboard(
-                upcoming=[], reserved=0, booked=0, active_leases=[], monthly_rent={}, activity=[]
-            )
         now = datetime.now(UTC)
         open_rows = self.session.scalars(
             select(Booking)
             .where(
-                Booking.tenant_id == tenant.id,
+                self._mine(),
                 Booking.status.in_([BookingStatus.PENDING, BookingStatus.CONFIRMED]),
                 Booking.end_at > now,
             )
             .order_by(Booking.start_at, Booking.id)
         ).all()
+        if tenant is None:
+            # Self-registered, no tenancy yet: their bookings only; no leases or activity.
+            return CustomerDashboard(
+                upcoming=self._read(list(open_rows[:upcoming_limit])),
+                reserved=sum(1 for b in open_rows if b.status == BookingStatus.PENDING),
+                booked=sum(1 for b in open_rows if b.status == BookingStatus.CONFIRMED),
+                active_leases=[],
+                monthly_rent={},
+                activity=[],
+            )
         today = business_today()
         leases = []
         seen_groups: set[uuid.UUID] = set()

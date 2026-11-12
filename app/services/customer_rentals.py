@@ -19,7 +19,7 @@ from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -53,7 +53,7 @@ def add_months(day: date, months: int) -> date:
 
 
 class CustomerRentalService:
-    def __init__(self, session: Session, user: AppUser, tenant: Tenant) -> None:
+    def __init__(self, session: Session, user: AppUser, tenant: Tenant | None) -> None:
         self.session = session
         self.user = user
         self.tenant = tenant
@@ -133,18 +133,22 @@ class CustomerRentalService:
         lead = crm.insert(
             {
                 "source": LeadSource.CLIENT_APP,
-                "company_name": self.tenant.company_name,
-                "contact_name": self.tenant.name,
-                "contact_email": self.user.email or self.tenant.email,
-                "contact_phone": self.tenant.phone,
+                "company_name": self.tenant.company_name if self.tenant else None,
+                "contact_name": (self.tenant.name if self.tenant else None)
+                or self.user.full_name
+                or self.user.email,
+                "contact_email": self.user.email or (self.tenant.email if self.tenant else None),
+                "contact_phone": (self.tenant.phone if self.tenant else None) or self.user.phone,
                 "property_id": prop.id,
                 "space_type": space.space_type,
                 "capacity": space.capacity,
                 "desired_start_date": start_date,
                 "currency": est.currency,
                 "requested_term_months": est.months,
-                "tenant_id": self.tenant.id,
-                "tenant_linked_at": datetime.now(UTC),
+                # A self-registered customer has no tenant yet: the lead stays unlinked
+                # until the property team links or creates one (L-1).
+                "tenant_id": self.tenant.id if self.tenant else None,
+                "tenant_linked_at": datetime.now(UTC) if self.tenant else None,
             },
             how=" from the client app",
         )
@@ -180,7 +184,12 @@ class CustomerRentalService:
         return list(
             self.session.scalars(
                 select(Lead)
-                .where(Lead.tenant_id == self.tenant.id, Lead.source == LeadSource.CLIENT_APP)
+                .where(
+                    Lead.source == LeadSource.CLIENT_APP,
+                    or_(Lead.created_by == self.user.id, Lead.tenant_id == self.tenant.id)
+                    if self.tenant
+                    else Lead.created_by == self.user.id,
+                )
                 .order_by(Lead.created_at.desc())
             )
         )

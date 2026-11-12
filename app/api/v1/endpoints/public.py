@@ -42,7 +42,7 @@ def capabilities() -> Capabilities:
     payment history and agreed deposits). Online payment and QR access are not implemented,
     and the client app shows them as unavailable."""
     return Capabilities(
-        customer_registration=False,
+        customer_registration=True,
         password_recovery=True,
         bookings=True,
         contracts=True,

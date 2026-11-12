@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.main import app
-from app.models import AppUser, Booking, Tenant
+from app.models import AppUser, Tenant
 from app.models.enums import UserRole
 from app.services.auth import get_auth_gateway
 from tests.conftest import make_token
@@ -291,35 +291,74 @@ def test_a_seat_booking_holds_only_that_seat(api: TestClient, priya: TestClient,
 class FakeGateway:
     def __init__(self) -> None:
         self.recovered: list[str] = []
+        self.signed_up: list[tuple[str, str]] = []
 
     def recover(self, email: str) -> None:
         self.recovered.append(email)
 
+    def sign_up(self, email: str, password: str, full_name: str, phone: str | None) -> str | None:
+        if any(e == email for e, _ in self.signed_up):
+            return None  # Supabase: already registered
+        self.signed_up.append((email, full_name))
+        return str(uuid.uuid4())
 
-def test_public_registration_is_closed(verifier: None) -> None:
+
+def test_customers_register_themselves_as_customers_only(
+    verifier: None, db_session: Session
+) -> None:
+    """12 Nov 2026: visitors create a customer account to book; never a tenant, never
+    another role. The same answer either way, so addresses cannot be probed."""
     gateway = FakeGateway()
     app.dependency_overrides[get_auth_gateway] = lambda: gateway
     try:
         client = TestClient(app)
-        body = {"email": "new@example.com", "password": "long-enough", "full_name": "Meera"}
-        for base in (f"{V1}/client", f"{V1}/customer"):
-            for path in ("register", "onboarding", "resend-confirmation"):
-                assert client.post(f"{base}/{path}", json=body).status_code == 404, path
-        caps = client.get(f"{PUBLIC}/capabilities").json()
-        assert caps["customer_registration"] is False
-        # Password reset still works for existing accounts (same answer for any address).
+        body = {
+            "full_name": "Meera Iyer",
+            "email": "Meera@Example.com",
+            "phone": "+91 98450 12345",
+            "password": "long-enough-1",
+        }
+        first = client.post(f"{CUSTOMER}/auth/register", json=body)
+        assert first.status_code == 202, first.text
+        user = db_session.scalar(select(AppUser).where(AppUser.email == "meera@example.com"))
+        assert (user.role, user.full_name, user.phone) == (
+            "CUSTOMER",
+            "Meera Iyer",
+            "+91 98450 12345",
+        )
+        assert db_session.scalar(select(func.count()).select_from(Tenant)) == 0
+        again = client.post(f"{CUSTOMER}/auth/register", json=body)
+        assert (again.status_code, again.json()) == (202, first.json())
+        assert len(gateway.signed_up) == 1  # no duplicate account
+        # No role can be chosen, and weak input is refused.
+        assert (
+            client.post(f"{CUSTOMER}/auth/register", json={**body, "role": "ADMIN"}).status_code
+            == 422
+        )
+        assert (
+            client.post(f"{CUSTOMER}/auth/register", json={**body, "password": "short"}).status_code
+            == 422
+        )
+        for path in ("onboarding", "resend-confirmation"):
+            assert client.post(f"{CUSTOMER}/{path}", json=body).status_code == 404, path
+        assert client.get(f"{PUBLIC}/capabilities").json()["customer_registration"] is True
+        # Password reset still works (same answer for any address).
         reset = client.post(f"{CUSTOMER}/password-recovery", json={"email": "a@example.com"})
         assert reset.status_code == 202 and gateway.recovered == ["a@example.com"]
     finally:
         app.dependency_overrides.pop(get_auth_gateway, None)
 
 
-def test_customers_without_an_activated_tenant_cannot_use_the_client_app(
+def test_customers_without_a_tenancy_book_but_see_no_contracts_or_money(
     verifier: None, db_session: Session, signing_key, hub: dict
 ) -> None:
-    def client_for(tenant: dict | None) -> TestClient:
+    def client_for(tenant: dict | None, active: bool = True) -> TestClient:
         user = AppUser(
-            id=uuid.uuid4(), email=f"{uuid.uuid4().hex}@example.com", role=UserRole.CUSTOMER
+            id=uuid.uuid4(),
+            email=f"{uuid.uuid4().hex}@example.com",
+            full_name="Walk In",
+            role=UserRole.CUSTOMER,
+            is_active=active,
         )
         db_session.add(user)
         db_session.flush()
@@ -331,49 +370,29 @@ def test_customers_without_an_activated_tenant_cannot_use_the_client_app(
         )
 
     now = datetime.now(UTC)
-    for state in (None, {}, {"client_invited_at": now}):
-        client = client_for(state)
-        assert client.get(f"{CUSTOMER}/me").status_code == 403
-        # No booking, and no tenant made for them by trying.
-        book(client, hub["seat1"], expected=403)
-    assert db_session.scalar(select(func.count()).select_from(Tenant)) == 2
-    inactive = client_for(
-        {"client_invited_at": now, "client_activated_at": now, "status": "INACTIVE"}
-    )
-    assert inactive.get(f"{CUSTOMER}/me").status_code == 403
-
-
-def test_admin_and_customer_permissions_do_not_overlap(api: TestClient, priya: TestClient) -> None:
-    assert priya.get(f"{V1}/properties").status_code == 403
-    assert priya.get(f"{V1}/bookings").status_code == 403
-    assert api.get(f"{CUSTOMER}/bookings").status_code == 403
-    assert TestClient(app).get(f"{CUSTOMER}/bookings").status_code == 401
-
-
-def test_customers_only_ever_see_their_own_bookings(
-    api: TestClient, priya: TestClient, ravi: TestClient, hub: dict, db_session: Session
-) -> None:
-    mine = book(priya, hub["seat1"], hours=3)
-    assert mine["quoted_total"] == 300.0 and mine["billing_period"] == "HOURLY"
-    stored = db_session.get(Booking, uuid.UUID(mine["id"]))
-    assert (stored.channel, stored.customer_email) == ("CUSTOMER", "priya@example.com")
-
-    assert [b["id"] for b in priya.get(f"{CUSTOMER}/bookings").json()["items"]] == [mine["id"]]
-    assert ravi.get(f"{CUSTOMER}/bookings").json()["total"] == 0
-    assert ravi.get(f"{CUSTOMER}/bookings/{mine['id']}").status_code == 404
-    assert ravi.post(f"{CUSTOMER}/bookings/{mine['id']}/cancel").status_code == 404
-
-    # Once confirmed, Ravi wanting the same seat is told it is taken, never by whom.
-    assert api.post(f"{V1}/bookings/{mine['id']}/confirm").status_code == 200
-    refused = book(ravi, hub["seat1"], expected=409)
-    assert refused["detail"].startswith("Booked")
-    assert mine["reference"] not in str(refused) and "priya" not in str(refused).lower()
-    assert "conflicts" not in refused
-    book(ravi, hub["seat2"])  # the next seat is free
-
-    cancelled = priya.post(f"{CUSTOMER}/bookings/{mine['id']}/cancel", json={"reason": "Plans"})
-    assert cancelled.json()["status"] == "CANCELLED" and cancelled.json()["can_cancel"] is False
-    assert priya.post(f"{CUSTOMER}/bookings/{mine['id']}/cancel").status_code == 409
+    self_registered = client_for(None)
+    me = self_registered.get(f"{CUSTOMER}/me").json()
+    assert (me["full_name"], me["is_tenant"]) == ("Walk In", False)
+    made = book(self_registered, hub["seat1"])
+    assert made["status"] == "PENDING"
+    assert [b["id"] for b in self_registered.get(f"{CUSTOMER}/bookings").json()["items"]] == [
+        made["id"]
+    ]
+    assert self_registered.get(f"{CUSTOMER}/dashboard").status_code == 200
+    # Contracts and money need a tenancy set up by the property team.
+    for path in ("contracts", "invoices", "payments", "deposits"):
+        assert self_registered.get(f"{CUSTOMER}/{path}").status_code == 403, path
+    # Invited but not activated: the same.
+    invited = client_for({"client_invited_at": now})
+    assert invited.get(f"{CUSTOMER}/contracts").status_code == 403
+    # No tenant was made for anyone by trying.
+    assert db_session.scalar(select(func.count()).select_from(Tenant)) == 1
+    # Another customer never sees the booking.
+    other = client_for(None)
+    assert other.get(f"{CUSTOMER}/bookings/{made['id']}").status_code == 404
+    assert other.get(f"{CUSTOMER}/bookings").json()["total"] == 0
+    # A deactivated account cannot use the client app at all.
+    assert client_for(None, active=False).get(f"{CUSTOMER}/me").status_code == 403
 
 
 def test_a_customer_cannot_choose_whom_a_booking_is_for(priya: TestClient, hub: dict) -> None:

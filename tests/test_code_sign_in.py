@@ -178,15 +178,21 @@ def test_an_activated_tenant_signs_in_by_mobile_or_email_code(
     assert by_email.json()["session"]["user"]["id"] == str(user_id)
 
 
-def test_an_invited_tenant_must_set_a_password_first(
+def test_an_invited_tenant_signs_in_but_sees_no_contracts_until_activated(
     client: TestClient, auth: CodeAuth, db_session: Session
 ) -> None:
     activated_tenant(db_session, auth, email="asha@example.com", activated=False)
     client.post(f"{CUSTOMER}/otp/request", json={"email": "asha@example.com"})
-    refused = client.post(
+    signed_in = client.post(
         f"{CUSTOMER}/otp/verify", json={"email": "asha@example.com", "code": GOOD}
     )
-    assert refused.status_code == 403
+    # 12 Nov 2026: any customer may sign in (the code proves the email), but contracts and
+    # money still need the tenancy to be activated by setting a password.
+    assert signed_in.status_code == 200, signed_in.text
+    assert signed_in.json()["status"] == "SIGNED_IN"
+    token = signed_in.json()["session"]["access_token"]
+    contracts = client.get(f"{CUSTOMER}/contracts", headers={"Authorization": f"Bearer {token}"})
+    assert contracts.status_code == 403
 
 
 def test_administrators_cannot_use_customer_codes(

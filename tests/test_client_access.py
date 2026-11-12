@@ -189,7 +189,8 @@ def test_setting_a_password_activates_and_only_then_the_client_app_opens(
     invite(api, tenant)
     token = invites.link_token("ops@acme.example")
     waiting = TestClient(app, headers={"Authorization": f"Bearer {token}"})
-    assert waiting.get(f"{CUSTOMER}/me").status_code == 403  # invited, not active yet
+    # Invited, not active yet: a customer may sign in, but contracts need activation.
+    assert waiting.get(f"{CUSTOMER}/contracts").status_code == 403
 
     short = TestClient(app).post(
         f"{V1}/client/auth/set-password",

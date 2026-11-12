@@ -146,9 +146,39 @@ class ClientAccessService:
             )
         )
         if others is not None:
-            raise ConflictError(
-                "Another account already uses this email. Use a different email for the tenant."
+            linked = self.session.scalar(select(Tenant.id).where(Tenant.user_id == others.id))
+            if others.role != UserRole.CUSTOMER or linked is not None or tenant.user_id:
+                raise ConflictError(
+                    "Another account already uses this email. Use a different email for the tenant."
+                )
+            # The customer registered themselves (12 Nov 2026): link that account to the
+            # tenant. They already have a password, so access is active at once.
+            now = datetime.now(UTC)
+            tenant.user_id = others.id
+            tenant.client_invited_at = tenant.client_activated_at = now
+            log_activity(
+                self.session,
+                self.actor,
+                action="client_linked",
+                entity_type="tenants",
+                entity_id=tenant.id,
+                property_id=None,
+                message=f'Tenant "{tenant.name}" was linked to the customer account that '
+                "registered with this email; client access is active.",
             )
+            commit(self.session)
+            return {
+                "tenant_id": tenant.id,
+                "status": access_status(tenant),
+                "email": email,
+                "invited_at": tenant.client_invited_at,
+                "activated_at": tenant.client_activated_at,
+                "email_requested": False,
+                "invitation_link": None,
+                "message": "This email already has a customer account (they registered "
+                "themselves). It is now linked to the tenant and client access is active; "
+                "no invitation was needed.",
+            }
 
         invitation = (
             self.gateway.invite(email, tenant.name)

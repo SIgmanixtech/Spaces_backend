@@ -236,6 +236,15 @@ class PasswordRecovery(InputSchema):
     email: EmailStr
 
 
+class CustomerRegistration(InputSchema):
+    """Only what is needed. No role: the backend always makes a CUSTOMER account."""
+
+    full_name: str = Field(min_length=1, max_length=200)
+    email: EmailStr
+    phone: str | None = Field(default=None, min_length=8, max_length=20, pattern=r"^\+?[0-9 ]+$")
+    password: str = Field(min_length=8, max_length=128)
+
+
 class OtpRequest(InputSchema):
     email: EmailStr
 
@@ -275,6 +284,11 @@ class CustomerProfile(ReadSchema):
     full_name: str | None
     phone: str | None
     company_name: str | None
+    is_tenant: bool = Field(
+        default=True,
+        description="False for a self-registered customer without a tenancy yet: contracts, "
+        "invoices and payments appear once the property team sets up their tenancy.",
+    )
 
 
 class CustomerProfileUpdate(UpdateSchema):

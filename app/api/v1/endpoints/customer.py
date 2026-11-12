@@ -11,7 +11,13 @@ from typing import Annotated
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import CurrentCustomer, DbSession, ListParams, get_token_verifier
+from app.api.dependencies import (
+    CurrentCustomer,
+    DbSession,
+    ListParams,
+    SignedInCustomer,
+    get_token_verifier,
+)
 from app.api.responses import NOT_FOUND, PROTECTED, VALIDATION_ERROR, _error
 from app.api.v1.endpoints.agreements import agreement_read
 from app.api.v1.endpoints.files import Storage, StorageFactory
@@ -33,6 +39,7 @@ from app.schemas.client import (
     CustomerGroupBookingCreate,
     CustomerProfile,
     CustomerProfileUpdate,
+    CustomerRegistration,
     HoldExtensionRequest,
     OtpRequest,
     OtpResult,
@@ -56,6 +63,7 @@ from app.services.auth import (
 from app.services.catalogue import CatalogueService
 from app.services.client_access import NOT_ACTIVATED, ClientAccessService
 from app.services.customer_billing import CustomerBillingService
+from app.services.customer_registration import CustomerRegistrationService
 from app.services.customer_rentals import CustomerRentalService
 from app.services.customers import (
     CustomerService,
@@ -115,13 +123,13 @@ def set_password(
 
 
 @router.get("/me", response_model=CustomerProfile, responses=PROTECTED, summary="My profile")
-def my_profile(user: CurrentCustomer, session: DbSession) -> CustomerProfile:
+def my_profile(user: SignedInCustomer, session: DbSession) -> CustomerProfile:
     return CustomerService(session, user).profile()
 
 
 @router.patch("/me", response_model=CustomerProfile, responses=PROTECTED, summary="Update profile")
 def update_profile(
-    user: CurrentCustomer, session: DbSession, body: CustomerProfileUpdate
+    user: SignedInCustomer, session: DbSession, body: CustomerProfileUpdate
 ) -> CustomerProfile:
     return CustomerService(session, user).update_profile(body.model_dump(exclude_unset=True))
 
@@ -130,7 +138,7 @@ def update_profile(
     "/bookings", response_model=Page[CustomerBooking], responses=PROTECTED, summary="My bookings"
 )
 def my_bookings(
-    user: CurrentCustomer,
+    user: SignedInCustomer,
     session: DbSession,
     query: ListParams,
     status: BookingStatus | None = None,
@@ -147,7 +155,7 @@ def my_bookings(
     summary="Book a space",
 )
 def book(
-    user: CurrentCustomer,
+    user: SignedInCustomer,
     session: DbSession,
     storage: StorageFactory,
     body: CustomerBookingCreate,
@@ -172,7 +180,7 @@ def book(
     summary="Book several spaces (e.g. 5 seats) for the same time",
 )
 def book_group(
-    user: CurrentCustomer,
+    user: SignedInCustomer,
     session: DbSession,
     storage: StorageFactory,
     body: CustomerGroupBookingCreate,
@@ -195,7 +203,9 @@ def book_group(
     responses={**PROTECTED, **NOT_FOUND},
     summary="One of my bookings",
 )
-def my_booking(user: CurrentCustomer, session: DbSession, booking_id: uuid.UUID) -> CustomerBooking:
+def my_booking(
+    user: SignedInCustomer, session: DbSession, booking_id: uuid.UUID
+) -> CustomerBooking:
     return CustomerService(session, user).booking(booking_id)
 
 
@@ -206,7 +216,7 @@ def my_booking(user: CurrentCustomer, session: DbSession, booking_id: uuid.UUID)
     summary="Move one of my bookings",
 )
 def reschedule_booking(
-    user: CurrentCustomer,
+    user: SignedInCustomer,
     session: DbSession,
     storage: StorageFactory,
     booking_id: uuid.UUID,
@@ -230,7 +240,7 @@ def reschedule_booking(
     summary="Cancel one of my bookings",
 )
 def cancel_booking(
-    user: CurrentCustomer,
+    user: SignedInCustomer,
     session: DbSession,
     booking_id: uuid.UUID,
     body: CustomerBookingCancel | None = None,
@@ -406,7 +416,7 @@ def download_my_agreement(
 @router.get(
     "/dashboard", response_model=CustomerDashboard, responses=PROTECTED, summary="My dashboard"
 )
-def my_dashboard(user: CurrentCustomer, session: DbSession) -> CustomerDashboard:
+def my_dashboard(user: SignedInCustomer, session: DbSession) -> CustomerDashboard:
     """Upcoming bookings with their status, active leases with the next rent date, and what
     recently happened to the customer's bookings and leases."""
     return CustomerService(session, user).dashboard()
@@ -487,7 +497,8 @@ def my_deposits(user: CurrentCustomer, session: DbSession) -> list[CustomerDepos
 
 
 def _rentals(user: AppUser, session: Session) -> CustomerRentalService:
-    return CustomerRentalService(session, user, CustomerService(session, user)._own_tenant())
+    # A self-registered customer has no tenant: their enquiry is still theirs (created_by).
+    return CustomerRentalService(session, user, CustomerService(session, user).tenant())
 
 
 @router.post(
@@ -497,7 +508,7 @@ def _rentals(user: AppUser, session: Session) -> CustomerRentalService:
     summary="Estimate a long-term rental",
 )
 def estimate_rental(
-    user: CurrentCustomer, session: DbSession, body: RentalRequestCreate
+    user: SignedInCustomer, session: DbSession, body: RentalRequestCreate
 ) -> RentalEstimate:
     """At the space's monthly price × months, with its availability. Holds nothing."""
     return _rentals(user, session).estimate(
@@ -513,7 +524,7 @@ def estimate_rental(
     summary="Ask for a long-term rental (monthly, quarterly, half-yearly, yearly)",
 )
 def request_rental(
-    user: CurrentCustomer, session: DbSession, body: RentalRequestCreate
+    user: SignedInCustomer, session: DbSession, body: RentalRequestCreate
 ) -> RentalRequestRead:
     """Becomes a lead for the property team (CRM). Nothing is held or signed; a contract is
     prepared only after the property team reaches Space Selected."""
@@ -528,7 +539,7 @@ def request_rental(
     responses=PROTECTED,
     summary="My long-term rental requests",
 )
-def my_rental_requests(user: CurrentCustomer, session: DbSession) -> list[RentalRequestRead]:
+def my_rental_requests(user: SignedInCustomer, session: DbSession) -> list[RentalRequestRead]:
     return _rentals(user, session).list()
 
 
@@ -579,3 +590,25 @@ def cancel_checkout(
 ) -> PaymentHoldRead:
     tenant = CustomerService(session, user)._own_tenant()
     return PaymentHoldRead.model_validate(PaymentHoldService(session, user).cancel(tenant, hold_id))
+
+
+# --- self-registration (12 Nov 2026) --------------------------------------------------------
+
+
+@router.post(
+    "/auth/register",
+    status_code=202,
+    responses={**VALIDATION_ERROR, 403: _error("Registration is closed.")},
+    summary="Create a customer account",
+)
+def register(body: CustomerRegistration, session: DbSession, gateway: Gateway) -> dict[str, str]:
+    """Creates a CUSTOMER sign-in only: never a tenant, never another role. Supabase emails a
+    confirmation link; the customer signs in after confirming. The same answer is given
+    whether or not the email was already registered, so addresses cannot be probed."""
+    CustomerRegistrationService(session, gateway).register(
+        body.full_name, str(body.email), body.phone, body.password
+    )
+    return {
+        "detail": "Check your email for a link to confirm your account, then sign in. If you "
+        "already have an account, sign in or reset your password."
+    }

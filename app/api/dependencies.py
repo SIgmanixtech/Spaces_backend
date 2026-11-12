@@ -103,6 +103,18 @@ def require_active_customer(user: CurrentUser, session: DbSession) -> AppUser:
 CurrentCustomer = Annotated[AppUser, Depends(require_active_customer)]
 
 
+def require_customer(user: CurrentUser) -> AppUser:
+    """Any signed-in customer, tenant or not (12 Nov 2026: customers register themselves to
+    book and to ask for long-term rentals). Contracts and money stay behind
+    ``CurrentCustomer`` (an activated tenant). Admin and customer permissions never overlap."""
+    if user.role != UserRole.CUSTOMER or not user.is_active:
+        raise ForbiddenError("You do not have permission to perform this action.")
+    return user
+
+
+SignedInCustomer = Annotated[AppUser, Depends(require_customer)]
+
+
 def list_query(
     page: Annotated[int, Query(ge=1, description="Page number, starting at 1.")] = 1,
     page_size: Annotated[int, Query(ge=1, le=100, description="Items per page.")] = 20,

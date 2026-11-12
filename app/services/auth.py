@@ -23,7 +23,6 @@ from app.core.errors import (
     UnauthorizedError,
 )
 from app.core.security import TokenVerifier
-from app.models.enums import UserRole
 from app.models.user import AppUser
 from app.schemas.auth import CurrentUserRead, SessionRead
 
@@ -102,6 +101,33 @@ class SupabaseAuthGateway:
                 "when you registered, then sign in."
             )
         return self._session(response, "Incorrect email or password.")
+
+    def sign_up(self, email: str, password: str, full_name: str, phone: str | None) -> str | None:
+        """Create the sign-in; Supabase emails a confirmation link (to the client app's
+        sign-in page when configured). Returns the new user's id, or None when the address
+        is already registered (Supabase answers the same way, so nothing is revealed)."""
+        body: dict[str, Any] = {
+            "email": email,
+            "password": password,
+            "data": {"full_name": full_name, **({"phone": phone} if phone else {})},
+        }
+        params = None
+        if self._redirect:
+            params = {"redirect_to": self._redirect.rsplit("/", 1)[0] + "/sign-in?verified=1"}
+        response = self._post("/signup", params=params, json=body)
+        if _signups_refused(response):
+            raise ForbiddenError("New registrations are closed. Contact the property team.")
+        if response.status_code == 422:
+            raise BadRequestError(
+                "Choose a stronger password (at least 8 characters, letters and numbers)."
+            )
+        if response.status_code >= 400:
+            raise BadRequestError("Registration failed. Try again later.")
+        data = response.json()
+        user = data.get("user") or data
+        if not user.get("identities"):
+            return None  # already registered
+        return user.get("id")
 
     def refresh(self, refresh_token: str) -> SupabaseSession:
         response = self._post(
@@ -315,11 +341,8 @@ def open_session(
     user = session.get(AppUser, claims.subject)
     if user is None or not user.is_active:
         raise ForbiddenError("Your account is not authorized to use this application.")
-    if user.role == UserRole.CUSTOMER:
-        from app.services.client_access import NOT_ACTIVATED, active_tenant
-
-        if active_tenant(session, user) is None:
-            raise ForbiddenError(NOT_ACTIVATED)
+    # Customers may sign in without a tenancy (they register themselves to book); what
+    # needs a tenancy (contracts, invoices...) is checked by those endpoints.
     return SessionRead(
         access_token=supabase_session.access_token,
         expires_in=supabase_session.expires_in,

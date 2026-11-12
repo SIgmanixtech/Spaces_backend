@@ -51,6 +51,8 @@ def test_every_business_route_requires_authentication(client: TestClient) -> Non
         "/client/api/v1/auth/refresh",
         # The client app: signing up and resetting a password happen before sign-in.
         "/client/api/v1/password-recovery",
+        # Customers register themselves (12 Nov 2026): a CUSTOMER sign-in only.
+        "/client/api/v1/auth/register",
         # The link's token is the proof; only invited tenants can use it.
         "/client/api/v1/auth/set-password",
         "/client/api/v1/otp/request",
