@@ -4,13 +4,16 @@ from typing import Literal
 
 from pydantic import Field
 
-from app.models.enums import ContractType, DocumentStatus, TemplateStatus
+from app.models.enums import ContractCategory, ContractType, DocumentStatus, TemplateStatus
 from app.schemas.common import InputSchema, ReadSchema
 
 
 class TemplateRead(ReadSchema):
     id: uuid.UUID
     contract_type: ContractType
+    category: ContractCategory | None = Field(
+        default=None, description="Null: used for any category without its own template."
+    )
     property_id: uuid.UUID | None = Field(description="Null: the default for every property.")
     name: str
     version: int
@@ -119,9 +122,16 @@ class CustomFieldValue(CustomField):
 
 
 class Signer(InputSchema):
+    """One person who signed. Both parties are required (D11.3): at least one TENANT and
+    one COMPANY (SIGMANIX) signer."""
+
     party: Literal["TENANT", "COMPANY"]
     name: str = Field(min_length=1, max_length=200)
-    designation: str | None = Field(default=None, max_length=120)
+    designation: str | None = Field(default=None, max_length=120, description="Role.")
+    company: str | None = Field(default=None, max_length=200, description="Signing for.")
+    signed_on: date | None = Field(
+        default=None, description="This signer's date, if different from the copy's."
+    )
 
 
 class SignedCopyRead(ReadSchema):

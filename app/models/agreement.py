@@ -28,6 +28,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Sequence,
     String,
     Text,
     UniqueConstraint,
@@ -37,7 +38,13 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
-from app.models.enums import ContractType, DocumentStatus, TemplateStatus
+from app.models.enums import (
+    AddendumStatus,
+    ContractCategory,
+    ContractType,
+    DocumentStatus,
+    TemplateStatus,
+)
 from app.models.mixins import (
     CreatedAtMixin,
     TimestampMixin,
@@ -51,15 +58,25 @@ class ContractTemplate(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         enum_check("contract_type", ContractType),
         enum_check("status", TemplateStatus),
-        UniqueConstraint(
-            "contract_type", "property_id", "version", name="uq_contract_templates_version"
+        enum_check("category", ContractCategory),
+        # Versions count per agreement type, category and scope (migration 0022). The
+        # expressions treat a missing category or property as one value, portably.
+        Index(
+            "uq_contract_templates_version",
+            "contract_type",
+            text("coalesce(category, '')"),
+            text("coalesce(property_id, '00000000-0000-0000-0000-000000000000'::uuid)"),
+            "version",
+            unique=True,
         ),
         CheckConstraint("version > 0", name="version_positive"),
         CheckConstraint("(status = 'DRAFT') = (approved_at IS NULL)", name="approved_unless_draft"),
-        # At most one ACTIVE template per contract type, for a property or as the default.
+        # At most one ACTIVE template per agreement type and category, for a property or as
+        # the default (D9.2).
         Index(
             "uq_contract_templates_active",
             "contract_type",
+            text("coalesce(category, '')"),
             text("coalesce(property_id, '00000000-0000-0000-0000-000000000000'::uuid)"),
             unique=True,
             postgresql_where=text("status = 'ACTIVE'"),
@@ -67,6 +84,8 @@ class ContractTemplate(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     contract_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    # D9.2: chosen by category + agreement type; NULL = made before categories (D8.6).
+    category: Mapped[str | None] = mapped_column(String(16))
     # Null: the default for every property without its own template of this type.
     property_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("properties.id", ondelete="RESTRICT"), index=True
@@ -190,3 +209,67 @@ class ContractSignedCopy(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     )
     replaced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     replace_reason: Mapped[str | None] = mapped_column(Text)
+
+
+addendum_reference_seq = Sequence("addendum_reference_seq", metadata=Base.metadata)
+
+
+class ContractAddendum(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """A change to the terms of a contract, on the same contract (LC-3). Its new values
+    (``changes``) apply only when it is recorded as signed by both parties (LC-4); until
+    then the contract's terms are unchanged. The values it replaced are kept in
+    ``previous``. Never deleted; a draft can be cancelled with a reason."""
+
+    __tablename__ = "contract_addenda"
+    __table_args__ = (
+        enum_check("status", AddendumStatus),
+        CheckConstraint("(status = 'SIGNED') = (signed_at IS NOT NULL)", name="signature_recorded"),
+        CheckConstraint(
+            "(status = 'CANCELLED') = (cancelled_at IS NOT NULL)", name="cancellation_recorded"
+        ),
+        CheckConstraint(
+            "status <> 'SIGNED' OR (object_path IS NOT NULL AND signed_on IS NOT NULL"
+            " AND jsonb_array_length(signers) > 0)",
+            name="signed_has_evidence",
+        ),
+    )
+
+    reference: Mapped[str] = mapped_column(
+        String(20),
+        unique=True,
+        nullable=False,
+        server_default=text(
+            "('AD-' || to_char(now(), 'YYYY') || '-' "
+            "|| lpad(nextval('addendum_reference_seq')::text, 6, '0'))"
+        ),
+    )
+    contract_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("tenant_occupancies.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=AddendumStatus.DRAFT.value
+    )
+    effective_date: Mapped[date] = mapped_column(Date, nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    changes: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    previous: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    # The signed copy (paper signature evidence), as for agreements.
+    bucket: Mapped[str | None] = mapped_column(String(100))
+    object_path: Mapped[str | None] = mapped_column(String(500), unique=True)
+    file_name: Mapped[str | None] = mapped_column(String(255))
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    sha256: Mapped[str | None] = mapped_column(String(64))
+    signed_on: Mapped[date | None] = mapped_column(Date)
+    signers: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    signed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancellation_reason: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("app_users.id", ondelete="SET NULL")
+    )

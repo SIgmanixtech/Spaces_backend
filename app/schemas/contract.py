@@ -5,13 +5,46 @@ from typing import ClassVar, Literal, Self
 
 from pydantic import Field, model_validator
 
-from app.models.enums import ContractType, DocumentStatus
+from app.models.enums import ContractCategory, ContractType, DocumentStatus
 from app.schemas.common import ConflictDetail, InputSchema, ReadSchema, UpdateSchema
 
 ContractState = Literal["PENDING", "ACTIVE", "EXPIRED", "CANCELLED", "TERMINATED"]
 
 
-class ContractCreate(InputSchema):
+class CategoryFields(InputSchema):
+    """Category and its details (owner decisions D8 and D10 of 2 Nov 2026). Required
+    details are checked when the contract is approved, so a draft can be saved first."""
+
+    category: ContractCategory | None = Field(
+        default=None,
+        description="SPACE, OFFICE, GOVERNMENT, PARKING or COMMERCIAL: what the agreement is "
+        "for. Separate from the agreement type. Null on contracts made before categories.",
+    )
+    main_contract_id: uuid.UUID | None = Field(
+        default=None,
+        description="Parking only: the same tenant's main contract it belongs to (D8.4). "
+        "Null for a standalone Parking contract (D8.5).",
+    )
+    expected_headcount: int | None = Field(
+        default=None, gt=0, le=100_000, description="Commercial: expected headcount (D10.1)."
+    )
+    occupants: int | None = Field(
+        default=None, gt=0, le=100_000, description="Office: number of occupants."
+    )
+    government_department: str | None = Field(default=None, max_length=200)
+    government_order_reference: str | None = Field(default=None, max_length=100)
+    vehicle_registration: str | None = Field(
+        default=None, max_length=20, description="Parking: vehicle registration."
+    )
+    lock_in_period: str | None = Field(
+        default=None, max_length=100, description="As printed on the agreement (D10.8)."
+    )
+    notice_period: str | None = Field(
+        default=None, max_length=100, description="As printed on the agreement (D10.8)."
+    )
+
+
+class ContractCreate(CategoryFields):
     tenant_id: uuid.UUID
     property_id: uuid.UUID
     space_id: uuid.UUID | None = Field(
@@ -58,10 +91,22 @@ class ContractUpdate(UpdateSchema):
         description="SPACE_LEASE or COWORKING_LICENCE: which agreement applies. Null falls "
         "back to the space's setting.",
     )
+    category: ContractCategory | None = None
+    main_contract_id: uuid.UUID | None = None
+    expected_headcount: int | None = Field(default=None, gt=0, le=100_000)
+    occupants: int | None = Field(default=None, gt=0, le=100_000)
+    government_department: str | None = Field(default=None, max_length=200)
+    government_order_reference: str | None = Field(default=None, max_length=100)
+    vehicle_registration: str | None = Field(default=None, max_length=20)
+    lock_in_period: str | None = Field(default=None, max_length=100)
+    notice_period: str | None = Field(default=None, max_length=100)
 
 
 class ContractCancel(InputSchema):
     reason: str | None = Field(default=None, max_length=2000)
+    include_parking: bool = Field(
+        default=True, description="Also cancel Parking contracts linked to it (LC-5)."
+    )
 
 
 class ContractTerminate(InputSchema):
@@ -69,12 +114,64 @@ class ContractTerminate(InputSchema):
         description="Last day held, inclusive. The space is free from the day after."
     )
     reason: str | None = Field(default=None, max_length=2000)
+    include_parking: bool = Field(
+        default=True, description="Also end Parking contracts linked to it (LC-5)."
+    )
 
 
 class ContractExtend(InputSchema):
     end_date: date | None = Field(
         description="The new last day, inclusive, or null to make the contract ongoing."
     )
+    include_parking: bool = Field(
+        default=True,
+        description="Also extend linked Parking contracts that end on the same day (LC-6).",
+    )
+
+
+class ContractHold(InputSchema):
+    hold_until: date | None = Field(
+        default=None, description="Last day held, inclusive. Default: 7 days from today."
+    )
+    reason: str | None = Field(default=None, max_length=2000)
+
+
+class ContractReason(InputSchema):
+    reason: str | None = Field(default=None, max_length=2000)
+
+
+class ContractRenew(InputSchema):
+    end_date: date | None = Field(
+        default=None,
+        description="Last day of the renewal. Omitted: the same length as the contract. "
+        "Null: ongoing (not for Commercial or Government).",
+    )
+    monthly_rent: Decimal | None = Field(default=None, ge=0, max_digits=12, decimal_places=2)
+    security_deposit: Decimal | None = Field(default=None, ge=0, max_digits=12, decimal_places=2)
+    terms: str | None = Field(default=None, max_length=20_000)
+    notes: str | None = Field(default=None, max_length=2000)
+    include_parking: bool = Field(
+        default=True, description="Also renew linked Parking contracts (LC-6)."
+    )
+
+
+class BookingConvert(CategoryFields):
+    """Admin turns a monthly booking into a pending contract (D12.3). Omitted values are
+    prefilled from the booking and the space's pricing."""
+
+    tenant_id: uuid.UUID | None = Field(
+        default=None, description="Required when the booking has no tenant."
+    )
+    start_date: date | None = None
+    end_date: date | None = None
+    monthly_rent: Decimal | None = Field(default=None, ge=0, max_digits=12, decimal_places=2)
+    security_deposit: Decimal | None = Field(default=None, ge=0, max_digits=12, decimal_places=2)
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+class PricingSuggestion(ReadSchema):
+    monthly_rent: Decimal | None
+    security_deposit: Decimal | None
 
 
 class ContractRead(ReadSchema):
@@ -135,6 +232,32 @@ class ContractRead(ReadSchema):
     )
     created_at: datetime
     updated_at: datetime
+    # Phase B2/B3
+    category: ContractCategory | None = None
+    main_contract_id: uuid.UUID | None = None
+    main_contract_reference: str | None = None
+    renews_contract_id: uuid.UUID | None = None
+    renews_contract_reference: str | None = None
+    renewed_by_reference: str | None = Field(
+        default=None, description="The renewal made from this contract, if any."
+    )
+    hold_until: date | None = Field(
+        default=None, description="Pending only: the last day the space is held."
+    )
+    hold_extension_requested_until: date | None = None
+    hold_extension_reason: str | None = None
+    expected_headcount: int | None = None
+    occupants: int | None = None
+    government_department: str | None = None
+    government_order_reference: str | None = None
+    vehicle_registration: str | None = None
+    lock_in_period: str | None = None
+    notice_period: str | None = None
+    booking_id: uuid.UUID | None = None
+    missing_for_approval: list[str] = Field(
+        default_factory=list,
+        description="What a categorised pending contract still needs before approval.",
+    )
 
 
 class ContractScopeSpace(ReadSchema):

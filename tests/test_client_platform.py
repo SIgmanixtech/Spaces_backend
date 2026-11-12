@@ -125,10 +125,12 @@ def test_rescheduling_reprices_rechecks_and_needs_confirmation_again(
         "DAILY",
         500.0,
     )
-    # The old time is free again; the new one is held.
-    book(ravi, hub["seat1"])
+    # The old time is free again. The new one is a request again: confirmed, it is taken.
+    theirs = book(ravi, hub["seat1"])
+    assert api.post(f"{V1}/bookings/{theirs['id']}/confirm").status_code == 200
+    assert api.post(f"{V1}/bookings/{mine['id']}/confirm").status_code == 200
     taken = book(ravi, hub["seat1"], start=MONDAY + timedelta(days=1), expected=409)
-    assert taken["detail"].startswith("Reserved")
+    assert taken["detail"].startswith("Booked")
     # Onto someone else's time: refused without naming them.
     other = book(ravi, hub["seat2"], start=MONDAY + timedelta(days=3))
     clash = priya.post(
@@ -172,14 +174,27 @@ def test_whole_floor_contract_and_child_bookings_exclude_each_other(
         "start_date": str(date.today()),
         "activate": True,
     }
-    # An existing seat booking blocks a new whole-floor lease...
+    # A seat request reserves nothing; a confirmed seat booking blocks a whole-floor lease...
     seat = book(priya, hub["seat1"])
+    assert api.post(f"{V1}/bookings/{seat['id']}/confirm").status_code == 200
     assert api.post(f"{V1}/contracts", json=contract).status_code == 409
     priya.post(f"{CUSTOMER}/bookings/{seat['id']}/cancel")
     # ...and once the floor is leased, nothing inside it can be booked.
     post(api, "contracts", contract)
-    for space in ("seat2", "cabin", "5B"):
-        period = "HOURLY" if space.startswith("seat") else "MONTHLY"
-        hours = 1 if period == "HOURLY" else 24 * 30
-        refused = book(priya, hub[space], period=period, hours=hours, expected=409)
-        assert "Occupied under a lease" in refused["detail"]
+    refused = book(priya, hub["seat2"], expected=409)
+    assert "Occupied under a lease" in refused["detail"]
+    # Cabins and portions are monthly-or-longer by contract for customers (owner matrix,
+    # 12 Nov 2026), so check them with confirmed admin bookings: refused inside the lease.
+    for space in ("cabin", "5B"):
+        response = api.post(
+            f"{V1}/bookings",
+            json={
+                "property_id": hub["property"]["id"],
+                "space_id": hub[space]["id"],
+                "customer_name": "Walk-in",
+                "start_at": iso(MONDAY),
+                "end_at": iso(MONDAY + timedelta(hours=1)),
+                "status": "CONFIRMED",
+            },
+        )
+        assert response.status_code == 409 and "occupied" in response.text.lower(), space

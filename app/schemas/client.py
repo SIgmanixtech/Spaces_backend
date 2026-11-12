@@ -91,10 +91,23 @@ class PublicSpace(ReadSchema):
     capacity: int | None
     is_rentable: bool
     bookable: bool = Field(description="Rentable, open, and priced for at least one period.")
+    rental_options: list["RentalOption"] = Field(
+        default_factory=list,
+        description="How a customer may rent this space for each duration (owner's matrix).",
+    )
     x: int | None
     y: int | None
     width: int | None
     height: int | None
+
+
+class RentalOption(ReadSchema):
+    duration: Literal["HOURLY", "DAILY", "WEEKLY", "MONTHLY", "QUARTERLY", "HALF_YEARLY", "YEARLY"]
+    mode: Literal["BOOKING", "OPTIONAL", "CONTRACT", "NOT_OFFERED", "OWNER", "DEFERRED"] = Field(
+        description="BOOKING: short-term booking request. OPTIONAL: booking, or a long-term "
+        "rental request. CONTRACT: long-term rental request only. Others: not offered."
+    )
+    months: int | None = Field(default=None, description="Term in months for long-term durations.")
 
 
 class PublicFloor(ReadSchema):
@@ -380,6 +393,24 @@ class CustomerContract(ReadSchema):
     spaces: list[str] = Field(
         default_factory=list, description="Every space the contract covers, by name."
     )
+    category: str | None = Field(
+        default=None, description="Space, Office, Government, Parking or Commercial."
+    )
+    hold_until: date | None = Field(
+        default=None,
+        description="A request waiting for the property team keeps its space until this day.",
+    )
+    hold_extension_requested_until: date | None = Field(
+        default=None, description="More time the customer asked for, waiting for a decision."
+    )
+    lock_in_period: str | None = None
+    notice_period: str | None = None
+    renews_reference: str | None = Field(default=None, description="The contract this one renews.")
+
+
+class HoldExtensionRequest(InputSchema):
+    until: date = Field(description="The day the request should be held until.")
+    reason: str = Field(min_length=1, max_length=2000)
 
 
 class Capabilities(ReadSchema):

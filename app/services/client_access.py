@@ -230,5 +230,11 @@ class ClientAccessService:
                 else f'Tenant "{tenant.name}" set a new password.'
             ),
         )
+        if first_time:
+            from app.services.lead_progress import leads_of_tenant, record_progress
+
+            leads = leads_of_tenant(self.session, tenant.id)
+            if leads:
+                record_progress(self.session, user, leads, "tenant activated client access")
         commit(self.session)
         return tenant

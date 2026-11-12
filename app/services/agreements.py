@@ -43,7 +43,13 @@ from app.models.booking import Booking
 from app.models.building import Building, Floor
 from app.models.company import CompanyProfile
 from app.models.crm import Proposal
-from app.models.enums import ContractStatus, ContractType, DocumentStatus, TemplateStatus
+from app.models.enums import (
+    ContractCategory,
+    ContractStatus,
+    ContractType,
+    DocumentStatus,
+    TemplateStatus,
+)
 from app.models.property import Property
 from app.models.space import Space
 from app.models.tenant import Tenant, TenantOccupancy
@@ -171,6 +177,23 @@ COMMON_PLACEHOLDERS = {
     "company.gstin": "Company GSTIN",
     "company.pan": "Company PAN",
     "company.cin": "Company CIN",
+    # Phase B3 (D8, D10): category and its details, as recorded on the contract.
+    "contract.category": "Contract category",
+    "contract.lock_in_period": "Lock-in period (as entered)",
+    "contract.notice_period": "Notice period (as entered)",
+    "contract.expected_headcount": "Expected headcount (Commercial)",
+    "contract.occupants": "Number of occupants (Office)",
+    "contract.government_department": "Government department",
+    "contract.government_order_reference": "Government order reference",
+    "contract.vehicle_registration": "Vehicle registration (Parking)",
+    "contract.main_contract_reference": "Main contract reference (linked Parking)",
+}
+CATEGORY_LABEL = {
+    "SPACE": "Space",
+    "OFFICE": "Office",
+    "GOVERNMENT": "Government",
+    "PARKING": "Parking",
+    "COMMERCIAL": "Commercial",
 }
 # Each type has its own vocabulary; a licence template cannot use lease terms or vice versa.
 TYPE_PLACEHOLDERS = {
@@ -189,6 +212,61 @@ TYPE_PLACEHOLDERS = {
         "licence.fee_words": "Licence fee in words",
     },
 }
+
+
+def _same_category(category: str | None):  # noqa: ANN202
+    return (
+        ContractTemplate.category.is_(None)
+        if category is None
+        else ContractTemplate.category == category
+    )
+
+
+def check_signers(signers: list[dict[str, Any]], signed_on: date) -> list[dict[str, Any]]:
+    """Signers of a signed copy (agreement or addendum), cleaned. Each needs a party and
+    a name; role, company and their own date are optional. Owner decision D11.3 (2 Nov
+    2026): both the tenant and SIGMANIX must have signed. Dates are business dates (IST)
+    and never in the future."""
+    # The business date (Asia/Kolkata), not UTC: early-morning IST is still "yesterday"
+    # in UTC, which would refuse a document signed today.
+    if signed_on > business_today():
+        raise BadRequestError("The signing date cannot be in the future.")
+    clean = []
+    for i, raw in enumerate(signers):
+        party = str(raw.get("party") or "").upper()
+        name = " ".join(str(raw.get("name") or "").split())
+        designation = " ".join(str(raw.get("designation") or "").split()) or None
+        company = " ".join(str(raw.get("company") or "").split()) or None
+        if party not in SIGNER_PARTIES or not name or len(name) > 200:
+            raise BadRequestError(f"Signer {i + 1}: give the party (tenant or company) and a name.")
+        own_date = raw.get("signed_on")
+        if isinstance(own_date, str) and own_date:
+            own_date = date.fromisoformat(own_date)
+        if own_date is not None and own_date > business_today():
+            raise BadRequestError(f"Signer {i + 1}: the signing date cannot be in the future.")
+        clean.append(
+            {
+                "party": party,
+                "name": name,
+                "designation": designation,
+                "company": company,
+                # Each signer's own date when they signed on different days; otherwise
+                # the copy's signing date.
+                "signed_on": (own_date or signed_on).isoformat(),
+            }
+        )
+    parties = {s["party"] for s in clean}
+    missing = [
+        label
+        for code, label in (("TENANT", "the tenant"), ("COMPANY", "SIGMANIX"))
+        if code not in parties
+    ]
+    if missing:
+        raise BadRequestError(
+            "Both parties must have signed: add a signer for " + " and ".join(missing) + "."
+        )
+    return clean
+
 
 _EXPR = re.compile(r"\{\{\s*(.*?)\s*\}\}", re.S)
 _NAME = re.compile(r"^[a-z_]+(\.[a-z_]+)*$")
@@ -366,6 +444,7 @@ class AgreementService:
         required_fields: list[str],
         notes: str | None,
         custom_fields: list[dict[str, Any]] | None = None,
+        category: ContractCategory | None = None,
     ) -> ContractTemplate:
         custom = clean_custom_fields(custom_fields or [])
         if len(data) > MAX_TEMPLATE_BYTES:
@@ -386,7 +465,9 @@ class AgreementService:
         version = (
             self.session.scalar(
                 select(func.max(ContractTemplate.version)).where(
-                    ContractTemplate.contract_type == contract_type, scope
+                    ContractTemplate.contract_type == contract_type,
+                    _same_category(category),
+                    scope,
                 )
             )
             or 0
@@ -394,6 +475,7 @@ class AgreementService:
         template = ContractTemplate(
             id=uuid.uuid4(),
             contract_type=contract_type,
+            category=category,
             property_id=property_id,
             name=name.strip(),
             version=version,
@@ -451,6 +533,7 @@ class AgreementService:
         for current in self.session.scalars(
             select(ContractTemplate).where(
                 ContractTemplate.contract_type == template.contract_type,
+                _same_category(template.category),
                 ContractTemplate.status == TemplateStatus.ACTIVE,
                 scope,
             )
@@ -555,21 +638,29 @@ class AgreementService:
         )
 
     def select_template(
-        self, contract_type: ContractType, property_id: uuid.UUID
+        self,
+        contract_type: ContractType,
+        property_id: uuid.UUID,
+        category: str | None = None,
     ) -> ContractTemplate | None:
-        for scope in (
-            ContractTemplate.property_id == property_id,
-            ContractTemplate.property_id.is_(None),
-        ):
-            found = self.session.scalar(
-                select(ContractTemplate).where(
-                    ContractTemplate.contract_type == contract_type,
-                    ContractTemplate.status == TemplateStatus.ACTIVE,
-                    scope,
+        """D9.2: by category and agreement type, the property's own template before the
+        default; then a template without a category (made before categories, D8.6)."""
+        categories = [category, None] if category else [None]
+        for wanted in categories:
+            for scope in (
+                ContractTemplate.property_id == property_id,
+                ContractTemplate.property_id.is_(None),
+            ):
+                found = self.session.scalar(
+                    select(ContractTemplate).where(
+                        ContractTemplate.contract_type == contract_type,
+                        _same_category(wanted),
+                        ContractTemplate.status == TemplateStatus.ACTIVE,
+                        scope,
+                    )
                 )
-            )
-            if found is not None:
-                return found
+                if found is not None:
+                    return found
         return None
 
     def plan(self, contract: TenantOccupancy, *, admin: bool = False) -> dict[str, Any]:
@@ -580,11 +671,18 @@ class AgreementService:
         (admin=False) still need an approved (ACTIVE) contract, as before."""
         decision = self.decide_type(contract)
         template = (
-            self.select_template(decision.contract_type, contract.property_id)
+            self.select_template(decision.contract_type, contract.property_id, contract.category)
             if decision.contract_type
             else None
         )
         problem = decision.problem
+        if problem is None and contract.category:
+            # D10: a categorised contract prints its details; ask for them first.
+            from app.services.contracts import ContractService
+
+            missing = ContractService(self.session)._missing(contract)
+            if missing:
+                problem = "Before the agreement is made, record: " + ", ".join(missing) + "."
         if problem is None and template is None:
             problem = (
                 f"No approved {TYPE_LABEL[decision.contract_type].lower()} template is active "
@@ -943,20 +1041,7 @@ class AgreementService:
             raise BadRequestError("Upload the signed copy as a PDF file.")
         # The business date (Asia/Kolkata), not UTC: early-morning IST is still "yesterday"
         # in UTC, which would refuse a document signed today.
-        if signed_on > business_today():
-            raise BadRequestError("The signing date cannot be in the future.")
-        clean_signers = []
-        for i, raw in enumerate(signers):
-            party = str(raw.get("party") or "").upper()
-            name = " ".join(str(raw.get("name") or "").split())
-            designation = " ".join(str(raw.get("designation") or "").split()) or None
-            if party not in SIGNER_PARTIES or not name or len(name) > 200:
-                raise BadRequestError(
-                    f"Signer {i + 1}: give the party (tenant or company) and a name."
-                )
-            clean_signers.append({"party": party, "name": name, "designation": designation})
-        if not clean_signers:
-            raise BadRequestError("Give at least one signer.")
+        clean_signers = check_signers(signers, signed_on)
         current = self.current_copies({document.id}).get(document.id)
         reason = (replace_reason or "").strip() or None
         if current is not None and reason is None:
@@ -1018,6 +1103,13 @@ class AgreementService:
                     "signed on paper."
                 ),
             )
+            from app.services.lead_progress import leads_of_contracts, record_progress
+
+            leads = leads_of_contracts(self.session, [document.contract_id])
+            if leads:
+                record_progress(
+                    self.session, self.actor, leads, f"signed copy of {document.file_name}"
+                )
             commit(self.session)
         except BaseException:
             self.session.rollback()
@@ -1148,6 +1240,23 @@ class AgreementService:
             "pricing.currency": contract.currency,
             "document.generated_on": _day(business_today()),  # IST date, not UTC
             "contract.other_charges": (contract.contract_fields or {}).get("other_charges"),
+            "contract.category": CATEGORY_LABEL.get(contract.category or ""),
+            "contract.lock_in_period": contract.lock_in_period,
+            "contract.notice_period": contract.notice_period,
+            "contract.expected_headcount": str(contract.expected_headcount)
+            if contract.expected_headcount
+            else None,
+            "contract.occupants": str(contract.occupants) if contract.occupants else None,
+            "contract.government_department": contract.government_department,
+            "contract.government_order_reference": contract.government_order_reference,
+            "contract.vehicle_registration": contract.vehicle_registration,
+            "contract.main_contract_reference": self.session.scalar(
+                select(TenantOccupancy.reference).where(
+                    TenantOccupancy.id == contract.main_contract_id
+                )
+            )
+            if contract.main_contract_id
+            else None,
         }
         proposal = (
             self.session.get(Proposal, contract.proposal_id) if contract.proposal_id else None

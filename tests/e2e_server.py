@@ -6,8 +6,8 @@ Everything is the production application except sign-in: Supabase Auth is
 replaced by a stand-in that accepts one fixed test account and signs tokens
 with a throwaway key, so a client can log in without a real password.
 
-It refuses to start unless TEST_DATABASE_URL names a local database whose name
-contains "test". On start it migrates that database and EMPTIES every table.
+It refuses to start unless TEST_DATABASE_URL names the local database spaces_test
+(tests/db_guard.py). On start it migrates that database and EMPTIES every table.
 """
 
 import os
@@ -18,7 +18,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from dotenv import dotenv_values
-from sqlalchemy.engine import make_url
+
+from tests.db_guard import TEST_DATABASE_NAME, refuse_unless_test_database
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 PORT = int(os.environ.get("E2E_PORT", "8001"))
@@ -31,14 +32,18 @@ E2E_PASSWORD = "e2e-only-password"
 ISSUER = "http://supabase.test/auth/v1"
 AUDIENCE = "authenticated"
 
-_url = os.environ.get("TEST_DATABASE_URL") or dotenv_values(BACKEND_ROOT / ".env").get(
-    "TEST_DATABASE_URL"
-)
+_local_env = dotenv_values(BACKEND_ROOT / ".env")
+_url = os.environ.get("TEST_DATABASE_URL") or _local_env.get("TEST_DATABASE_URL")
 if not _url:
     sys.exit("TEST_DATABASE_URL is not configured.")
-_parsed = make_url(_url)
-if _parsed.host not in {"127.0.0.1", "localhost"} or "test" not in (_parsed.database or ""):
-    sys.exit('Refusing to start: TEST_DATABASE_URL must be a local database named "*test*".')
+# Same checks as the test suite, before the app is imported or anything connects: only
+# the local disposable spaces_test, never the application database, Supabase, a pooler,
+# a remote host or an address hiding its host or database in the options.
+_refusal = refuse_unless_test_database(
+    _url, {os.environ.get("DATABASE_URL"), _local_env.get("DATABASE_URL")}
+)
+if _refusal:
+    sys.exit(f"Refusing to start the e2e server. {_refusal}")
 
 os.environ.update(
     {
@@ -220,7 +225,7 @@ def main() -> None:
     app.dependency_overrides[get_token_verifier] = lambda: TokenVerifier(
         issuer=ISSUER, audience=AUDIENCE, key_resolver=lambda _token: public_key
     )
-    print(f"E2E API on http://127.0.0.1:{PORT}/api/v1 (database: {_parsed.database})", flush=True)
+    print(f"E2E API on http://127.0.0.1:{PORT}/api/v1 (database: {TEST_DATABASE_NAME})", flush=True)
     print(f"LOCAL DEMO sign-in code for the activated test tenants: {DEMO_OTP}", flush=True)
     print(
         f"Activated test tenants: {', '.join(E2E_CUSTOMERS)} (password as the admin's)", flush=True

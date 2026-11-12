@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     # Calendar dates (occupancy start/end, "today") are interpreted in this zone.
     # Timestamps are always stored and returned in UTC.
     business_timezone: str = "Asia/Kolkata"
+    # Online payment with 10-minute checkout holds (12 Nov 2026). Off until a payment
+    # gateway is chosen and approved: without one a hold could never be paid.
+    online_payments_enabled: bool = False
 
     @field_validator("business_timezone")
     @classmethod

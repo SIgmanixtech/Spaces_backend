@@ -9,6 +9,8 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
+    Index,
+    Integer,
     Numeric,
     Sequence,
     String,
@@ -19,7 +21,7 @@ from sqlalchemy.dialects.postgresql import JSONB, ExcludeConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
-from app.models.enums import ContractStatus, ContractType, TenantStatus
+from app.models.enums import ContractCategory, ContractStatus, ContractType, TenantStatus
 from app.models.mixins import ArchivableMixin, TimestampMixin, UUIDPrimaryKeyMixin, enum_check
 
 contract_reference_seq = Sequence("contract_reference_seq", metadata=Base.metadata)
@@ -110,6 +112,49 @@ class TenantOccupancy(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             using="gist",
             name="ex_tenant_occupancies_space_dates",
         ),
+        # Phase B2/B3 (migration 0022).
+        enum_check("category", ContractCategory),
+        CheckConstraint(
+            "main_contract_id IS NULL OR category = 'PARKING'", name="main_only_for_parking"
+        ),
+        CheckConstraint("main_contract_id IS NULL OR main_contract_id <> id", name="not_own_main"),
+        CheckConstraint(
+            "renews_contract_id IS NULL OR renews_contract_id <> id", name="not_own_renewal"
+        ),
+        CheckConstraint(
+            "(expected_headcount IS NULL OR expected_headcount > 0)"
+            " AND (occupants IS NULL OR occupants > 0)",
+            name="counts_positive",
+        ),
+        Index(
+            "ix_tenant_occupancies_main_contract_id",
+            "main_contract_id",
+            postgresql_where=text("main_contract_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_tenant_occupancies_renews",
+            "renews_contract_id",
+            unique=True,
+            postgresql_where=text("renews_contract_id IS NOT NULL AND status <> 'CANCELLED'"),
+        ),
+        Index(
+            "ix_tenant_occupancies_hold_until",
+            "hold_until",
+            postgresql_where=text("status = 'PENDING' AND hold_until IS NOT NULL"),
+        ),
+        Index(
+            "ix_tenant_occupancies_ending",
+            "end_date",
+            postgresql_where=text("status = 'ACTIVE' AND end_date IS NOT NULL"),
+        ),
+        Index("ix_tenant_occupancies_category", "category"),
+        # A booking becomes at most one live contract (D12.3).
+        Index(
+            "uq_tenant_occupancies_booking",
+            "booking_id",
+            unique=True,
+            postgresql_where=text("booking_id IS NOT NULL AND status <> 'CANCELLED'"),
+        ),
     )
 
     reference: Mapped[str] = mapped_column(
@@ -170,3 +215,28 @@ class TenantOccupancy(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     contract_fields: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
+    # --- Phase B2/B3 (owner decisions of 2 Nov 2026; migration 0022) ---------------------
+    # What the agreement is for (D8). NULL on contracts made before categories (D8.6).
+    category: Mapped[str | None] = mapped_column(String(16))
+    # A Parking contract linked to its main contract (D8.4); NULL when standalone (D8.5).
+    main_contract_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tenant_occupancies.id", ondelete="RESTRICT")
+    )
+    # The contract this one renews (LC-2): a new contract from the day after it ends.
+    renews_contract_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("tenant_occupancies.id", ondelete="RESTRICT")
+    )
+    # A PENDING contract that holds its space keeps it until this day, inclusive (D12.4-6).
+    hold_until: Mapped[date | None] = mapped_column(Date)
+    # A customer asking for more time: the day asked for and why, until the team decides.
+    hold_extension_requested_until: Mapped[date | None] = mapped_column(Date)
+    hold_extension_reason: Mapped[str | None] = mapped_column(Text)
+    # D10.1-D10.2: category details, recorded as given and printed on the agreement.
+    expected_headcount: Mapped[int | None] = mapped_column(Integer)
+    occupants: Mapped[int | None] = mapped_column(Integer)
+    government_department: Mapped[str | None] = mapped_column(String(200))
+    government_order_reference: Mapped[str | None] = mapped_column(String(100))
+    vehicle_registration: Mapped[str | None] = mapped_column(String(20))
+    # D10.8: printed on the agreement only; text, so no unit or calculation is assumed.
+    lock_in_period: Mapped[str | None] = mapped_column(String(100))
+    notice_period: Mapped[str | None] = mapped_column(String(100))

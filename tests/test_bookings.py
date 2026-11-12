@@ -42,6 +42,9 @@ def booking_body(room: dict, start: datetime = START, hours: float = 1, **extra:
         "customer_name": "Priya Nair",
         "start_at": iso(start),
         "end_at": iso(start + timedelta(hours=hours)),
+        # Only confirmed bookings hold their time (12 Nov 2026); tests about pending
+        # requests pass status="PENDING".
+        "status": "CONFIRMED",
     }
     body.update(extra)
     return body
@@ -55,7 +58,9 @@ def book(api: TestClient, room: dict, start: datetime = START, **extra: object) 
 
 
 def test_create_booking(api: TestClient, room: dict) -> None:
-    booking = book(api, room, customer_email="priya@example.com")
+    body = booking_body(room, customer_email="priya@example.com")
+    body.pop("status")  # the default: a request waiting for confirmation
+    booking = post(api, "bookings", body)
 
     assert re.fullmatch(r"BK-\d{4}-\d{6}", booking["reference"])
     assert booking["status"] == "PENDING"
@@ -287,7 +292,7 @@ def test_delete_cancels_rather_than_deletes(api: TestClient, room: dict) -> None
 
 
 def test_status_transitions(api: TestClient, room: dict) -> None:
-    booking = book(api, room)
+    booking = book(api, room, status="PENDING")
     url = f"{BOOKINGS}/{booking['id']}"
 
     too_early = api.post(f"{url}/complete")
@@ -370,8 +375,8 @@ def test_reschedule_checks_for_conflicts(api: TestClient, room: dict) -> None:
 
 
 def test_list_filters_search_and_window(api: TestClient, room: dict) -> None:
-    first = book(api, room, customer_name="Priya Nair")
-    second = book(api, room, START + 24 * HOUR, customer_name="Arjun Rao")
+    first = book(api, room, customer_name="Priya Nair", status="PENDING")
+    second = book(api, room, START + 24 * HOUR, customer_name="Arjun Rao", status="PENDING")
     api.post(f"{BOOKINGS}/{second['id']}/confirm")
 
     assert api.get(BOOKINGS, params={"status": "CONFIRMED"}).json()["total"] == 1
@@ -449,7 +454,7 @@ def test_concurrent_staggered_requests_never_overlap(
                     "customer_name": f"Racer {number}",
                     "start_at": start,
                     "end_at": start + HOUR,
-                    "status": BookingStatus.PENDING,
+                    "status": BookingStatus.CONFIRMED,  # holding bookings never overlap
                 }
             )
         except ConflictError:

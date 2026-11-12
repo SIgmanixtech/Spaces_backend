@@ -17,8 +17,9 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 from dotenv import dotenv_values
 from sqlalchemy import text
-from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
+
+from tests.db_guard import refuse_unless_test_database
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 # Nothing listens here, so tests without a test database fail fast instead of
@@ -29,23 +30,15 @@ TEST_ORIGIN = "http://localhost:5173"
 _local_env = dotenv_values(BACKEND_ROOT / ".env")
 TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL") or _local_env.get("TEST_DATABASE_URL")
 
-if TEST_DATABASE_URL and TEST_DATABASE_URL in {
-    os.environ.get("DATABASE_URL"),
-    _local_env.get("DATABASE_URL"),
-}:
-    pytest.exit(
-        "TEST_DATABASE_URL is the same database as DATABASE_URL. "
-        "Refusing to run tests against the application database.",
-        returncode=2,
-    )
-
-# Database tests truncate every table. Supabase databases are always named
-# "postgres", so this also stops a Supabase URL being used by mistake.
-if TEST_DATABASE_URL and "test" not in (make_url(TEST_DATABASE_URL).database or ""):
-    pytest.exit(
-        'TEST_DATABASE_URL must point at a database whose name contains "test".',
-        returncode=2,
-    )
+# Database tests truncate tables, drop and recreate schemas and run migrations up and
+# down. Before the app is imported or anything connects, refuse every address except the
+# local disposable spaces_test: not the application database, not Supabase or a pooler,
+# not a remote host, no host or database hidden in the options (tests/db_guard.py).
+_refusal = refuse_unless_test_database(
+    TEST_DATABASE_URL, {os.environ.get("DATABASE_URL"), _local_env.get("DATABASE_URL")}
+)
+if _refusal:
+    pytest.exit(_refusal, returncode=2)
 
 os.environ.update(
     {

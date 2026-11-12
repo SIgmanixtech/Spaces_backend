@@ -72,9 +72,13 @@ def test_overlapping_bookings_are_rejected(db_session: Session) -> None:
         db_session.commit()
 
 
-def test_pending_booking_also_blocks(db_session: Session) -> None:
+def test_pending_requests_do_not_block_but_confirmed_bookings_do(db_session: Session) -> None:
+    """12 Nov 2026 (migration 0023): a pending request reserves nothing; the database
+    refuses only overlapping confirmed (or completed) bookings."""
     space = make_space(db_session, make_property(db_session))
     db_session.add(make_booking(space, START, START + HOUR, status=BookingStatus.PENDING))
+    db_session.add(make_booking(space, START, START + HOUR, status=BookingStatus.PENDING))
+    db_session.add(make_booking(space, START, START + HOUR))
     db_session.commit()
 
     db_session.add(make_booking(space, START, START + HOUR))

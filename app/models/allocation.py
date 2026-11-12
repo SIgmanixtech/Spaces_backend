@@ -53,8 +53,11 @@ class Allocation(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
         enum_check("source_type", AllocationSource),
         CheckConstraint(
             "(source_type = 'BOOKING' AND booking_id IS NOT NULL AND contract_id IS NULL"
-            " AND NOT upper_inf(period))"
-            " OR (source_type = 'CONTRACT' AND contract_id IS NOT NULL AND booking_id IS NULL)",
+            " AND payment_hold_id IS NULL AND NOT upper_inf(period))"
+            " OR (source_type = 'CONTRACT' AND contract_id IS NOT NULL AND booking_id IS NULL"
+            " AND payment_hold_id IS NULL)"
+            " OR (source_type = 'PAYMENT_HOLD' AND payment_hold_id IS NOT NULL"
+            " AND booking_id IS NULL AND contract_id IS NULL AND NOT upper_inf(period))",
             name="source",
         ),
         CheckConstraint(
@@ -68,6 +71,7 @@ class Allocation(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
         ),
         UniqueConstraint("booking_id", name="uq_allocations_booking"),
         UniqueConstraint("contract_id", name="uq_allocations_contract"),
+        UniqueConstraint("payment_hold_id", name="uq_allocations_payment_hold"),
         # Target of the claims' composite key, so a claim always carries its
         # allocation's current period and active flag.
         UniqueConstraint("id", "period", "is_active", name="uq_allocations_claim_key"),
@@ -79,6 +83,10 @@ class Allocation(UUIDPrimaryKeyMixin, CreatedAtMixin, Base):
     )
     contract_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("tenant_occupancies.id", ondelete="RESTRICT")
+    )
+    # Migration 0023: a temporary checkout hold.
+    payment_hold_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("payment_holds.id", ondelete="RESTRICT")
     )
     property_id: Mapped[uuid.UUID] = mapped_column(nullable=False, index=True)
     space_id: Mapped[uuid.UUID] = mapped_column(nullable=False, index=True)

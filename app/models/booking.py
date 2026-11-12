@@ -50,7 +50,9 @@ class Booking(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ExcludeConstraint(
             ("space_id", "="),
             (text("tstzrange(start_at, end_at, '[)')"), "&&"),
-            where=text(f"status <> '{BookingStatus.CANCELLED.value}'"),
+            # Only confirmed (and completed) bookings hold: a pending request reserves
+            # nothing (12 Nov 2026, migration 0023).
+            where=text("status IN ('CONFIRMED', 'COMPLETED')"),
             using="gist",
             name="ex_bookings_space_time",
         ),

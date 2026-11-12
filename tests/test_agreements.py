@@ -75,7 +75,8 @@ def sign_with_copy(api: TestClient, document_id: str, expected: int = 201) -> di
         f"{V1}/admin/contract-documents/{document_id}/signed-copy",
         data={
             "signed_on": "2026-11-01",
-            "signers": '[{"party": "TENANT", "name": "Asha Rao", "designation": "Director"}]',
+            "signers": '[{"party": "TENANT", "name": "Asha Rao", "designation": "Director"},'
+            ' {"party": "COMPANY", "name": "Kiran Rao", "designation": "Authorised signatory"}]',
         },
         files={"file": ("signed.pdf", SIGNED_PDF, "application/pdf")},
     )

@@ -60,7 +60,11 @@ from app.schemas.common import ListQuery
 from app.services.allocations import AllocationConflict, AllocationEngine, booking_period
 from app.services.base import commit, flush, log_activity, require
 from app.services.hierarchy import Family, family
-from app.services.occupancy import OPEN_BOOKING_STATUSES, holds_inventory
+from app.services.occupancy import (
+    HOLDING_BOOKING_STATUSES,
+    OPEN_BOOKING_STATUSES,
+    holds_inventory,
+)
 from app.services.pricing import PricingService, periods_in
 
 MAX_DURATION = timedelta(days=366)
@@ -295,10 +299,19 @@ class BookingService:
         }
 
     def confirm(self, booking_id: uuid.UUID) -> BookingRead:
+        """Confirming is when the booking starts to hold its time: the space is checked
+        again now (a request reserves nothing), and refused with 409 if it was taken."""
         booking = self._transition(booking_id, BookingStatus.CONFIRMED)
         if booking.end_at <= datetime.now(UTC):
             self.session.rollback()
             raise ConflictError("The booking's time has already passed.")
+        self.engine.share_property(booking.property_id)
+        space = self._lock_space(booking.space_id)
+        self._ensure_free(
+            space, booking.start_at, booking.end_at, booking.tenant_id, exclude_id=booking.id
+        )
+        flush(self.session)
+        self._hold(booking)
         return self._finish("confirmed", booking)
 
     def complete(self, booking_id: uuid.UUID) -> BookingRead:
@@ -330,9 +343,19 @@ class BookingService:
         return booking
 
     def _hold(self, booking: Booking) -> None:
-        """Writes, moves or releases the booking's allocation to match the booking."""
+        """Writes, moves or releases the booking's allocation to match the booking. Only a
+        confirmed booking holds; a pending request reserves nothing."""
         allocation = self.engine.for_booking(booking.id)
-        if booking.status == BookingStatus.CANCELLED or self._inside_own_contract(booking):
+        if booking.status not in HOLDING_BOOKING_STATUSES:
+            if allocation is not None:
+                self.engine.release(
+                    allocation,
+                    "BOOKING_CANCELLED"
+                    if booking.status == BookingStatus.CANCELLED
+                    else "PENDING_REQUEST",
+                )
+            return
+        if self._inside_own_contract(booking):
             if allocation is not None:
                 self.engine.release(allocation, "INSIDE_OWN_CONTRACT")
             return
@@ -475,7 +498,7 @@ class BookingService:
             select(Booking)
             .where(
                 Booking.space_id.in_(space_ids),
-                Booking.status != BookingStatus.CANCELLED,
+                Booking.status.in_(HOLDING_BOOKING_STATUSES),
                 Booking.start_at < end_at,
                 Booking.end_at > start_at,
             )
@@ -544,6 +567,26 @@ class BookingService:
             ]
             self.session.rollback()
             raise AllocationConflict(found, "The space is occupied by a tenant during that time.")
+        # Holds that exist only as allocations (12 Nov 2026): another customer's active
+        # checkout, or another tenant's pending contract holding its space (7-day hold).
+        # A booking request takes no hold of its own, so check them here.
+        held = [
+            c
+            for c in self.engine.conflicts(
+                space.id,
+                booking_period(start_at, end_at),
+                exclude=self._own_allocations(exclude_id),
+            )
+            if c.kind == "PAYMENT_HOLD"
+            or (
+                c.kind == "CONTRACT"
+                and c.status == "PENDING"
+                and self._contract_tenant(c.reference) != tenant_id
+            )
+        ]
+        if held:
+            self.session.rollback()
+            raise AllocationConflict(held, "Reserved: the space is held for part of that time.")
 
     def _log(self, action: str, booking: Booking, property_id: uuid.UUID, suffix: str = "") -> None:
         log_activity(

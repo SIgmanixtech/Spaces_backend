@@ -103,6 +103,18 @@ class LeadRead(ReadSchema):
     )
     tenant_name: str | None = None
     tenant_linked_at: datetime | None = None
+    pipeline_stage: Literal[
+        "LEAD_CREATED",
+        "LEAD_REVIEWED",
+        "SPACE_SELECTED",
+        "CONTRACT_PREPARED",
+        "CONTRACT_COMPLETED",
+        "TENANT_ACTIVATED",
+    ] = Field(
+        default="LEAD_CREATED",
+        description="The stored stage, or the later stage the lead's contract records show "
+        "(Contract Prepared, Contract Completed, Tenant Activated; set automatically, BR-006).",
+    )
     is_prospect: bool = Field(
         default=False,
         description="True when the lead has at least one proposal that is not withdrawn. "

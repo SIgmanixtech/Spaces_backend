@@ -25,20 +25,28 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.errors import BadRequestError, ConflictError, NotFoundError
 from app.models.activity import ActivityLog
 from app.models.agreement import ContractDocument
 from app.models.allocation import Allocation
 from app.models.booking import Booking
 from app.models.enums import (
+    CATEGORIES_NEEDING_END_DATE,
+    CATEGORY_REQUIRED_FIELDS,
     HOLDING_CONTRACT_STATUSES,
     AllocationSource,
+    BillingPeriod,
+    BookingStatus,
+    ContractCategory,
     ContractStatus,
     DocumentStatus,
     PropertyStatus,
@@ -69,6 +77,41 @@ from app.services.client_access import completed_contract_condition, completed_c
 from app.services.occupancy import business_today
 
 ENTITY_TYPES = ("contracts", "tenant_occupancies")
+# Owner decision D12.5 (2 Nov 2026): a pending contract holds its space for 7 days by
+# default; the property team may set another day.
+HOLD_DAYS = 7
+# Category and its details (D8, D10), set on every row of a several-seat contract together.
+CATEGORY_FIELDS = (
+    "category",
+    "main_contract_id",
+    "expected_headcount",
+    "occupants",
+    "government_department",
+    "government_order_reference",
+    "vehicle_registration",
+    "lock_in_period",
+    "notice_period",
+)
+# Terms an addendum changes once the agreement is signed (LC-3).
+TERM_FIELDS = (
+    "monthly_rent",
+    "security_deposit",
+    "terms",
+    "lock_in_period",
+    "notice_period",
+    "expected_headcount",
+    "occupants",
+    "government_department",
+    "government_order_reference",
+    "vehicle_registration",
+)
+FIELD_LABEL = {
+    "expected_headcount": "expected headcount",
+    "occupants": "number of occupants",
+    "government_department": "government department",
+    "government_order_reference": "government order reference",
+    "vehicle_registration": "vehicle registration",
+}
 
 
 def effective_status(contract: TenantOccupancy, today: date) -> str:
@@ -222,6 +265,7 @@ class ContractService:
             status=ContractStatus.PENDING,
             created_by=self.actor.id if self.actor else None,
         )
+        self._check_category(contract)
         self.session.add(contract)
         flush(self.session)
         self.session.refresh(contract, ["reference"])  # assigned by the database
@@ -239,7 +283,7 @@ class ContractService:
         first row and the other rows carry no rent of their own. Holds nothing: no
         booking, allocation or activation, and no tenant is created."""
         from app.models.crm import Lead, Proposal, ProposalSpace
-        from app.models.enums import ProposalStatus
+        from app.models.enums import LeadStage, ProposalStatus
 
         proposal = self.session.scalar(
             select(Proposal).where(Proposal.id == proposal_id).with_for_update()
@@ -252,6 +296,13 @@ class ContractService:
                 f"{proposal.status.lower()}."
             )
         lead = self.session.get(Lead, proposal.lead_id)
+        # Owner decision 2 Nov 2026 (lead -> contract, question 3): a contract is made only
+        # once the lead has reached Space Selected. Proposals themselves may come earlier.
+        if lead is not None and lead.stage != LeadStage.SPACE_SELECTED:
+            raise ConflictError(
+                f"Lead {lead.reference} has not reached Space Selected yet. Move the lead to "
+                "Space Selected first; then the contract can be created."
+            )
         if lead is None or lead.tenant_id is None:
             raise ConflictError(
                 "Link the lead to a tenant first (CRM, lead page); no tenant is created here."
@@ -313,6 +364,14 @@ class ContractService:
                 f'for tenant "{tenant.name}" at "{prop.name}" from proposal {proposal.reference}',
             )
             made.append(contract)
+        from app.services.lead_progress import record_progress
+
+        record_progress(
+            self.session,
+            self.actor,
+            [lead.id],
+            f"contract {made[0].reference} created from proposal {proposal.reference}",
+        )
         commit(self.session)
         return self.get(made[0].id)
 
@@ -326,11 +385,14 @@ class ContractService:
             status=ContractStatus.PENDING,
             created_by=self.actor.id if self.actor else None,
         )
+        # D12.6: a customer's request holds its space like any pending contract, 7 days.
+        if contract.hold_until is None:
+            contract.hold_until = business_today() + timedelta(days=HOLD_DAYS)
         self.session.add(contract)
         flush(self.session)
         self.session.refresh(contract, ["reference"])
         self._hold(contract)
-        self._log("requested", contract)
+        self._log("requested", contract, f"holding the space until {contract.hold_until}")
         commit(self.session)
         return contract
 
@@ -341,10 +403,30 @@ class ContractService:
             raise ConflictError(
                 "Dates of an activated contract change only by extending or terminating it."
             )
+        # LC-3/LC-4: once the agreement is signed, its terms change only by an addendum, so
+        # a signed agreement is never silently replaced. Notes and category stay editable.
+        changed_terms = sorted(
+            k for k in TERM_FIELDS if k in values and values[k] != getattr(contract, k)
+        )
+        if (
+            changed_terms
+            and self._agreement_statuses({contract.id}).get(contract.id) == DocumentStatus.SIGNED
+        ):
+            raise ConflictError(
+                "The agreement is signed. Change "
+                + ", ".join(k.replace("_", " ") for k in changed_terms)
+                + " with an addendum, which applies once both parties sign it."
+            )
+        shared = {k: values.pop(k) for k in CATEGORY_FIELDS if k in values}
         for field, value in {**values, **dates}.items():
             setattr(contract, field, value)
+        members = self._group(contract, contract.status) if shared else [contract]
+        for member in members:
+            for field, value in shared.items():
+                setattr(member, field, value)
+            self._check_category(member)
         self._check_order(contract)
-        if dates and self.engine.for_contract(contract.id) is not None:
+        if dates and self._is_holding(contract):
             # A requested contract already holds its space: move the hold with the dates.
             self._hold(contract)
         self._log("updated", contract)
@@ -356,12 +438,29 @@ class ContractService:
         contract = self._lock(contract_id)
         if contract.status != ContractStatus.PENDING:
             raise ConflictError(f"A {contract.status.lower()} contract cannot be activated.")
-        for member in self._group(contract, ContractStatus.PENDING):
+        members = self._group(contract, ContractStatus.PENDING)
+        for member in members:
+            self._check_ready(member)
+        for member in members:
             self._activate(member)
+            member.hold_extension_requested_until = None
+            member.hold_extension_reason = None
+        self._lead_progress(members, f"contract {contract.reference} approved")
         commit(self.session)
         return self.get(contract_id)
 
-    def cancel(self, contract_id: uuid.UUID, reason: str | None) -> ContractRead:
+    def _lead_progress(self, contracts: Sequence[TenantOccupancy], cause: str) -> None:
+        """Record the automatic lead stage (owner decision L-2) of the leads these
+        contracts came from, in the same transaction."""
+        from app.services.lead_progress import leads_of_contracts, record_progress
+
+        leads = leads_of_contracts(self.session, [c.id for c in contracts])
+        if leads:
+            record_progress(self.session, self.actor, leads, cause)
+
+    def cancel(
+        self, contract_id: uuid.UUID, reason: str | None, *, include_parking: bool = True
+    ) -> ContractRead:
         contract = self._lock(contract_id)
         if contract.status == ContractStatus.CANCELLED:
             raise ConflictError("The contract is already cancelled.")
@@ -371,13 +470,28 @@ class ContractService:
             raise ConflictError(
                 "The contract has taken effect. Terminate it instead, so its history is kept."
             )
-        for member in self._group(contract, contract.status):
+        members = self._group(contract, contract.status)
+        for member in members:
             self._cancel(member, reason)
+        if include_parking:
+            # LC-5: linked parking ends with its main contract unless the admin says no.
+            note = f"Main contract {contract.reference} was cancelled."
+            for parking in self._linked_parking(members, (ContractStatus.PENDING,)):
+                self._cancel(parking, note)
+            for parking in self._linked_parking(members, (ContractStatus.ACTIVE,)):
+                if parking.start_date > business_today():
+                    self._cancel(parking, note)
+        self._lead_progress(members, f"contract {contract.reference} cancelled")
         commit(self.session)
         return self.get(contract_id)
 
     def terminate(
-        self, contract_id: uuid.UUID, termination_date: date, reason: str | None
+        self,
+        contract_id: uuid.UUID,
+        termination_date: date,
+        reason: str | None,
+        *,
+        include_parking: bool = True,
     ) -> ContractRead:
         contract = self._lock(contract_id)
         if contract.status != ContractStatus.ACTIVE:
@@ -388,38 +502,331 @@ class ContractService:
             )
         if contract.end_date is not None and termination_date > contract.end_date:
             raise BadRequestError("The termination date is after the contract ends.")
-        if contract.original_end_date is None:
-            contract.original_end_date = contract.end_date
-        contract.end_date = termination_date
-        contract.status = ContractStatus.TERMINATED
-        contract.terminated_at = datetime.now(UTC)
-        contract.termination_reason = reason
-        self._sync_allocation(contract)
-        self._log(
-            "terminated",
-            contract,
-            f"with effect after {termination_date.isoformat()}" + (f": {reason}" if reason else ""),
-        )
+        self._terminate(contract, termination_date, reason)
+        if include_parking:
+            # LC-5: linked parking ends with its main contract unless the admin says no.
+            note = f"Main contract {contract.reference} was terminated."
+            for parking in self._linked_parking([contract], (ContractStatus.ACTIVE,)):
+                if parking.start_date > termination_date:
+                    self._cancel(parking, note)
+                elif parking.end_date is None or parking.end_date > termination_date:
+                    self._terminate(parking, termination_date, note)
+            for parking in self._linked_parking([contract], (ContractStatus.PENDING,)):
+                self._cancel(parking, note)
         commit(self.session)
         return self.get(contract_id)
 
-    def extend(self, contract_id: uuid.UUID, end_date: date | None) -> ContractRead:
+    def extend(
+        self, contract_id: uuid.UUID, end_date: date | None, *, include_parking: bool = True
+    ) -> ContractRead:
+        """Date-only change (an extension). Changes to terms go through an addendum."""
         contract = self._lock(contract_id)
         if contract.status != ContractStatus.ACTIVE:
             raise ConflictError(f"A {contract.status.lower()} contract cannot be extended.")
         if end_date is not None and end_date < contract.start_date:
             raise BadRequestError("end_date cannot be before start_date.")
+        if end_date is None and contract.category in CATEGORIES_NEEDING_END_DATE:
+            raise BadRequestError(
+                f"A {str(contract.category).lower()} contract needs an end date; it cannot be "
+                "made ongoing."
+            )
         before = contract.end_date
-        contract.end_date = end_date
-        self._hold(contract)
-        self._log(
-            "extended",
-            contract,
-            f"from {before.isoformat() if before else 'ongoing'} to "
-            f"{end_date.isoformat() if end_date else 'ongoing'}",
+        parking = (
+            [
+                p
+                for p in self._linked_parking([contract], (ContractStatus.ACTIVE,))
+                if p.end_date == before
+            ]
+            if include_parking
+            else []
         )
+        for row in [contract, *parking]:
+            row.end_date = end_date
+            self._hold(row)
+            self._log(
+                "extended",
+                row,
+                f"from {before.isoformat() if before else 'ongoing'} to "
+                f"{end_date.isoformat() if end_date else 'ongoing'}"
+                + (f" with main contract {contract.reference}" if row is not contract else ""),
+            )
         commit(self.session)
         return self.get(contract_id)
+
+    # --- holds (owner decisions D12.4-D12.6) ------------------------------------------
+
+    def hold(self, contract_id: uuid.UUID, until: date | None, reason: str | None) -> ContractRead:
+        """Hold a pending contract's space until ``until`` (default 7 days from today), or
+        move an existing hold. Checks the space is free first; refused with 409 if not."""
+        contract = self._lock(contract_id)
+        if contract.status != ContractStatus.PENDING:
+            raise ConflictError("Only a pending contract is held; an approved one holds anyway.")
+        if contract.space_id is None:
+            raise ConflictError(
+                "A contract for the whole property cannot be held while pending; approve it."
+            )
+        today = business_today()
+        until = until or today + timedelta(days=HOLD_DAYS)
+        if until < today:
+            raise BadRequestError("The hold cannot end in the past.")
+        members = self._group(contract, ContractStatus.PENDING)
+        before = contract.hold_until if self._is_holding(contract) else None
+        for member in members:
+            member.hold_until = until
+            member.hold_extension_requested_until = None
+            member.hold_extension_reason = None
+            self._hold(member)
+            self._log(
+                "hold_changed" if before else "held",
+                member,
+                (f"hold moved from {before} to {until}" if before else f"holding until {until}")
+                + (f": {reason}" if reason else ""),
+            )
+        commit(self.session)
+        return self.get(contract_id)
+
+    def release_hold(self, contract_id: uuid.UUID, reason: str | None) -> ContractRead:
+        contract = self._lock(contract_id)
+        if contract.status != ContractStatus.PENDING or not self._is_holding(contract):
+            raise ConflictError("The contract does not hold its space.")
+        for member in self._group(contract, ContractStatus.PENDING):
+            allocation = self.engine.for_contract(member.id)
+            if allocation is not None:
+                self.engine.release(allocation, "HOLD_RELEASED")
+            self._log("hold_released", member, f": {reason}" if reason else "")
+        commit(self.session)
+        return self.get(contract_id)
+
+    def decline_hold_extension(self, contract_id: uuid.UUID, reason: str | None) -> ContractRead:
+        contract = self._lock(contract_id)
+        if contract.hold_extension_requested_until is None:
+            raise ConflictError("No extension of the hold was asked for.")
+        for member in self._group(contract, contract.status):
+            asked = member.hold_extension_requested_until
+            member.hold_extension_requested_until = None
+            member.hold_extension_reason = None
+            self._log(
+                "hold_extension_declined",
+                member,
+                f"(asked until {asked})" + (f": {reason}" if reason else ""),
+            )
+        commit(self.session)
+        return self.get(contract_id)
+
+    def ask_hold_extension(self, contract: TenantOccupancy, until: date, reason: str) -> None:
+        """The customer asks for more time; the property team approves (hold) or declines."""
+        if contract.status != ContractStatus.PENDING or not self._is_holding(contract):
+            raise ConflictError("Only a request that still holds its space can be extended.")
+        if contract.hold_until is not None and until <= contract.hold_until:
+            raise BadRequestError("Ask for a day after the current hold ends.")
+        reason = " ".join((reason or "").split())
+        if not reason:
+            raise BadRequestError("Say why more time is needed.")
+        for member in self._group(contract, ContractStatus.PENDING):
+            member.hold_extension_requested_until = until
+            member.hold_extension_reason = reason[:2000]
+            self._log("hold_extension_requested", member, f"until {until}: {reason[:200]}")
+        commit(self.session)
+
+    # --- renewal and ending soon (LC-2, LC-7) -----------------------------------------
+
+    def renew(self, contract_id: uuid.UUID, values: dict[str, Any]) -> ContractRead:
+        """A new PENDING contract from the day after this one ends, linked to it (LC-2).
+        Copies tenant, space, category and its details, type and terms; rent, deposit,
+        end date, terms and notes may be given new values. Linked parking ending on the same
+        day is renewed with it (LC-6) unless ``include_parking`` is false. Nothing is held
+        until the renewal is approved."""
+        include_parking = bool(values.pop("include_parking", True))
+        contract = self._lock(contract_id)
+        if contract.status != ContractStatus.ACTIVE:
+            raise ConflictError(f"A {contract.status.lower()} contract cannot be renewed.")
+        if contract.end_date is None:
+            raise ConflictError("An ongoing contract has no end to renew from; extend it instead.")
+        made = self._renew_rows(self._group(contract, ContractStatus.ACTIVE), values)
+        if include_parking:
+            for parking in self._linked_parking([contract], (ContractStatus.ACTIVE,)):
+                if parking.end_date == contract.end_date:
+                    keep = {"end_date": made[0].end_date}
+                    for row in self._renew_rows([parking], keep):
+                        row.main_contract_id = made[0].id
+        commit(self.session)
+        return self.get(made[0].id)
+
+    def _renew_rows(
+        self, rows: list[TenantOccupancy], values: dict[str, Any]
+    ) -> list[TenantOccupancy]:
+        first = rows[0]
+        existing = self.session.scalar(
+            select(TenantOccupancy.reference).where(
+                TenantOccupancy.renews_contract_id == first.id,
+                TenantOccupancy.status != ContractStatus.CANCELLED,
+            )
+        )
+        if existing:
+            raise ConflictError(f"{first.reference} is already renewed by {existing}.")
+        assert first.end_date is not None
+        start = first.end_date + timedelta(days=1)
+        if "end_date" in values:
+            end = values["end_date"]
+        else:
+            end = start + (first.end_date - first.start_date)
+        if end is not None and end < start:
+            raise BadRequestError(f"The renewal starts on {start}; its end cannot be earlier.")
+        if end is None and first.category in CATEGORIES_NEEDING_END_DATE:
+            raise BadRequestError(f"A {str(first.category).lower()} contract needs an end date.")
+        group_id = uuid.uuid4() if len(rows) > 1 else None
+        made = []
+        for i, old in enumerate(rows):
+            new = TenantOccupancy(
+                tenant_id=old.tenant_id,
+                property_id=old.property_id,
+                space_id=old.space_id,
+                group_id=group_id,
+                renews_contract_id=old.id,
+                proposal_id=old.proposal_id,
+                start_date=start,
+                end_date=end,
+                monthly_rent=values.get("monthly_rent", old.monthly_rent)
+                if i == 0
+                else old.monthly_rent,
+                security_deposit=values.get("security_deposit", old.security_deposit)
+                if i == 0
+                else old.security_deposit,
+                currency=old.currency,
+                terms=values.get("terms", old.terms),
+                contract_type=old.contract_type,
+                customer_details=old.customer_details,
+                contract_fields=old.contract_fields,
+                notes=values.get("notes") or f"Renewal of {old.reference}.",
+                status=ContractStatus.PENDING,
+                created_by=self.actor.id if self.actor else None,
+                **{f: getattr(old, f) for f in CATEGORY_FIELDS},
+            )
+            self.session.add(new)
+            flush(self.session)
+            self.session.refresh(new, ["reference"])
+            self._log("created", new, f"as the renewal of {old.reference}, from {start}")
+            self._log("renewed", old, f"by {new.reference}, from {start}")
+            made.append(new)
+        return made
+
+    def ending_soon(self, days: int = 60) -> list[ContractRead]:
+        """Approved contracts whose last day is within ``days`` (LC-7: 60 in the app),
+        soonest first, each with the renewal already made, if any."""
+        today = business_today()
+        rows = self.session.scalars(
+            select(TenantOccupancy)
+            .where(
+                TenantOccupancy.status == ContractStatus.ACTIVE,
+                TenantOccupancy.end_date >= today,
+                TenantOccupancy.end_date <= today + timedelta(days=days),
+            )
+            .order_by(TenantOccupancy.end_date, TenantOccupancy.reference)
+        ).all()
+        return self.to_read(rows)
+
+    # --- booking to contract (D12.1-D12.3) ---------------------------------------------
+
+    def convert_booking(self, booking_id: uuid.UUID, values: dict[str, Any]) -> ContractRead:
+        """Turn a monthly booking into a PENDING contract for its space, prefilled from the
+        booking and its pricing, holding the space for 7 days (D12.4). Hourly, daily and
+        weekly bookings stay bookings. The booking is kept and reads as CONVERTED, linked
+        to the contract; it stops holding its time and the contract holds instead, all in
+        one transaction."""
+        from app.services.bookings import BookingService
+
+        booking = self.session.scalar(
+            select(Booking).where(Booking.id == booking_id).with_for_update()
+        )
+        if booking is None:
+            raise NotFoundError("Booking not found.")
+        if booking.status not in (BookingStatus.PENDING, BookingStatus.CONFIRMED):
+            raise ConflictError(
+                f"A {booking.status.lower()} booking cannot be turned into a contract."
+            )
+        # D12.1-D12.2: monthly or longer. A customer booking states its billing period; an
+        # admin booking has none, so its length decides (at least one calendar month).
+        first_day = booking.start_at.astimezone(_zone()).date()
+        last_moment = booking.end_at.astimezone(_zone())
+        long_enough = last_moment.date() >= _one_month_after(first_day)
+        if booking.billing_period not in (None, BillingPeriod.MONTHLY) or (
+            booking.billing_period is None and not long_enough
+        ):
+            period = (booking.billing_period or "shorter than a month").lower().replace("_", " ")
+            raise ConflictError(
+                f"Only a booking of a month or longer becomes a contract; this one is {period}. "
+                "Hourly, daily and weekly bookings stay bookings."
+            )
+        tenant_id = values.get("tenant_id") or booking.tenant_id
+        if tenant_id is None:
+            raise BadRequestError(
+                "The booking has no tenant. Choose the tenant the contract is for."
+            )
+        tenant = require(self.session, Tenant, tenant_id, "Tenant")
+        start = values.get("start_date") or max(
+            business_today(), booking.start_at.astimezone(_zone()).date()
+        )
+        if "end_date" in values:
+            end = values["end_date"]
+        else:
+            end = max(booking.end_at.astimezone(_zone()).date() - timedelta(days=1), start)
+        rent = values.get("monthly_rent")
+        deposit = values.get("security_deposit")
+        if rent is None or deposit is None:
+            suggestion = self.suggest_pricing(booking.space_id, start)
+            rent = suggestion["monthly_rent"] if rent is None else rent
+            deposit = suggestion["security_deposit"] if deposit is None else deposit
+        BookingService(self.session, self.actor).cancel(
+            booking.id, "Turned into a contract by the property team.", action="converted"
+        )
+        contract = TenantOccupancy(
+            tenant_id=tenant.id,
+            property_id=booking.property_id,
+            space_id=booking.space_id,
+            booking_id=booking.id,
+            start_date=start,
+            end_date=end,
+            monthly_rent=rent,
+            security_deposit=deposit,
+            currency=booking.quoted_currency or "INR",
+            notes=values.get("notes") or f"Made from booking {booking.reference}.",
+            status=ContractStatus.PENDING,
+            hold_until=business_today() + timedelta(days=HOLD_DAYS),
+            created_by=self.actor.id if self.actor else None,
+            **{f: values[f] for f in CATEGORY_FIELDS if values.get(f) is not None},
+        )
+        self._check_order(contract)
+        self._check_category(contract)
+        self.session.add(contract)
+        flush(self.session)
+        self.session.refresh(contract, ["reference"])
+        self._hold(contract)
+        self._log(
+            "created",
+            contract,
+            f"from booking {booking.reference}, holding the space until {contract.hold_until}",
+        )
+        commit(self.session)
+        return self.get(contract.id)
+
+    def suggest_pricing(self, space_id: uuid.UUID | None, on: date) -> dict[str, Any]:
+        """D10.3-D10.4: rent and deposit suggested from the space's monthly pricing. The
+        admin may change them; a deposit of zero is allowed."""
+        from app.services.pricing import PricingService
+
+        out: dict[str, Any] = {"monthly_rent": None, "security_deposit": None}
+        if space_id is None:
+            return out
+        try:
+            _, estimate = PricingService(self.session).estimate(
+                space_id, BillingPeriod.MONTHLY, on=on
+            )
+        except (NotFoundError, BadRequestError):
+            return out
+        out["monthly_rent"] = Decimal(str(estimate.recurring_total))
+        if estimate.deposit is not None:
+            out["security_deposit"] = Decimal(str(estimate.deposit))
+        return out
 
     # --- used by the occupancy endpoints, which predate contracts ---------------------
 
@@ -484,6 +891,86 @@ class ContractService:
         if space.property_id != property_id:
             raise BadRequestError("The space does not belong to this property.")
         return space
+
+    def _is_holding(self, contract: TenantOccupancy) -> bool:
+        allocation = self.engine.for_contract(contract.id)
+        return allocation is not None and allocation.is_active
+
+    def _linked_parking(
+        self, mains: Sequence[TenantOccupancy], statuses: tuple[str, ...]
+    ) -> list[TenantOccupancy]:
+        return list(
+            self.session.scalars(
+                select(TenantOccupancy)
+                .where(
+                    TenantOccupancy.main_contract_id.in_([m.id for m in mains]),
+                    TenantOccupancy.status.in_(statuses),
+                )
+                .order_by(TenantOccupancy.reference)
+                .with_for_update()
+            )
+        )
+
+    def _terminate(
+        self, contract: TenantOccupancy, termination_date: date, reason: str | None
+    ) -> None:
+        if contract.original_end_date is None:
+            contract.original_end_date = contract.end_date
+        contract.end_date = termination_date
+        contract.status = ContractStatus.TERMINATED
+        contract.terminated_at = datetime.now(UTC)
+        contract.termination_reason = reason
+        self._sync_allocation(contract)
+        self._log(
+            "terminated",
+            contract,
+            f"with effect after {termination_date.isoformat()}" + (f": {reason}" if reason else ""),
+        )
+
+    def _check_category(self, contract: TenantOccupancy) -> None:
+        """D8.4-D8.5: only a Parking contract links to a main contract; the main contract
+        is the same tenant's, not itself Parking and not cancelled."""
+        if contract.main_contract_id is None:
+            return
+        if contract.category != ContractCategory.PARKING:
+            raise BadRequestError("Only a Parking contract can be linked to a main contract.")
+        main = self.session.get(TenantOccupancy, contract.main_contract_id)
+        if main is None:
+            raise BadRequestError("The main contract does not exist.")
+        if main.id == contract.id:
+            raise BadRequestError("A contract cannot be its own main contract.")
+        if main.tenant_id != contract.tenant_id:
+            raise BadRequestError("The main contract belongs to another tenant.")
+        if main.category == ContractCategory.PARKING:
+            raise BadRequestError("A Parking contract cannot be the main contract.")
+        if main.status == ContractStatus.CANCELLED:
+            raise BadRequestError(f"The main contract {main.reference} is cancelled.")
+
+    def _missing(self, contract: TenantOccupancy) -> list[str]:
+        """What a categorised contract still needs before approval (D10.1-D10.6). Contracts
+        without a category (made before categories, D8.6) are approved as before."""
+        if contract.category is None:
+            return []
+        missing = [
+            FIELD_LABEL[f]
+            for f in CATEGORY_REQUIRED_FIELDS.get(contract.category, ())
+            if getattr(contract, f) in (None, "")
+        ]
+        if contract.end_date is None and contract.category in CATEGORIES_NEEDING_END_DATE:
+            missing.append("end date")
+        # D10.3: rent required. A several-seat contract carries the rent on its first row.
+        if contract.monthly_rent is None and contract.group_id is None:
+            missing.append("monthly rent")
+        return missing
+
+    def _check_ready(self, contract: TenantOccupancy) -> None:
+        missing = self._missing(contract)
+        if missing:
+            raise ConflictError(
+                f"Contract {contract.reference} ({str(contract.category).lower()}) needs "
+                + ", ".join(missing)
+                + " before it can be approved."
+            )
 
     @staticmethod
     def _check_order(contract: TenantOccupancy) -> None:
@@ -665,11 +1152,29 @@ class ContractService:
         agreements = self._agreement_statuses(ids)
         completed = completed_contract_ids(self.session, ids)
         today = business_today()
+        link_ids = {x for c in contracts for x in (c.main_contract_id, c.renews_contract_id) if x}
+        links = (
+            dict(
+                self.session.execute(
+                    select(TenantOccupancy.id, TenantOccupancy.reference).where(
+                        TenantOccupancy.id.in_(link_ids)
+                    )
+                ).all()
+            )
+            if link_ids
+            else {}
+        )
+        renewals = dict(
+            self.session.execute(
+                select(TenantOccupancy.renews_contract_id, TenantOccupancy.reference).where(
+                    TenantOccupancy.renews_contract_id.in_(ids),
+                    TenantOccupancy.status != ContractStatus.CANCELLED,
+                )
+            ).all()
+        )
         # A customer's pending request holds its space too; read the holds, not the status.
         held = {
-            c.id
-            for c in contracts
-            if c.status == ContractStatus.PENDING and self.engine.for_contract(c.id) is not None
+            c.id for c in contracts if c.status == ContractStatus.PENDING and self._is_holding(c)
         }
         out = []
         for c in contracts:
@@ -710,6 +1215,24 @@ class ContractService:
                     agreement_status=agreements.get(c.id),
                     proposal_id=c.proposal_id,
                     completes_contract=c.id in completed,
+                    category=c.category,
+                    main_contract_id=c.main_contract_id,
+                    main_contract_reference=links.get(c.main_contract_id),
+                    renews_contract_id=c.renews_contract_id,
+                    renews_contract_reference=links.get(c.renews_contract_id),
+                    renewed_by_reference=renewals.get(c.id),
+                    hold_until=c.hold_until if c.status == ContractStatus.PENDING else None,
+                    hold_extension_requested_until=c.hold_extension_requested_until,
+                    hold_extension_reason=c.hold_extension_reason,
+                    expected_headcount=c.expected_headcount,
+                    occupants=c.occupants,
+                    government_department=c.government_department,
+                    government_order_reference=c.government_order_reference,
+                    vehicle_registration=c.vehicle_registration,
+                    lock_in_period=c.lock_in_period,
+                    notice_period=c.notice_period,
+                    booking_id=c.booking_id,
+                    missing_for_approval=self._missing(c) if c.status == "PENDING" else [],
                 )
             )
         return out
@@ -766,3 +1289,15 @@ def group_members(session: Session, contract: TenantOccupancy) -> list[TenantOcc
 
 
 __all__ = ["Conflict", "ContractService", "effective_status", "group_details", "group_members"]
+
+
+def _zone() -> ZoneInfo:
+    return ZoneInfo(get_settings().business_timezone)
+
+
+def _one_month_after(day: date) -> date:
+    """The same day next month, or that month's last day (31 Jan -> 28/29 Feb)."""
+    import calendar
+
+    year, month = (day.year + 1, 1) if day.month == 12 else (day.year, day.month + 1)
+    return date(year, month, min(day.day, calendar.monthrange(year, month)[1]))

@@ -31,7 +31,6 @@ from app.models.enums import (
     AmenityLevel,
     AmenityStatus,
     BillingPeriod,
-    BookingStatus,
     ContractStatus,
     FileKind,
     LayoutStatus,
@@ -61,6 +60,7 @@ from app.schemas.client import (
     PublicRule,
     PublicSpace,
     QuoteRead,
+    RentalOption,
     SpaceAvailability,
     StartingPrice,
 )
@@ -72,6 +72,8 @@ from app.services.amenities import LEVEL_WHERE, offered_anywhere
 from app.services.base import page_of
 from app.services.files import FileService
 from app.services.pricing import PricingService, is_priceable, periods_in
+from app.services.rental_policy import TERM_MONTHS
+from app.services.rental_policy import options as rental_options
 from app.storage import ObjectStorage
 
 # Documents may be contracts or internal papers: never part of a public listing.
@@ -382,6 +384,12 @@ class CatalogueService:
                     bookable=is_priceable(s)
                     and s.operational_status == SpaceOperationalStatus.ACTIVE
                     and bool(prices.get(s.id)),
+                    rental_options=[
+                        RentalOption(duration=d.value, mode=m.value, months=TERM_MONTHS.get(d))
+                        for d, m in rental_options(s.space_type)
+                    ]
+                    if is_priceable(s)
+                    else [],
                     x=s.x,
                     y=s.y,
                     width=s.width,
@@ -620,9 +628,9 @@ class CatalogueService:
             )
         if hold.kind == "CONTRACT":
             return answer("OCCUPIED", f"Occupied under a lease for some of that time{where}.")
-        if hold.status == BookingStatus.PENDING:
+        if hold.kind == "PAYMENT_HOLD":
             return answer(
-                "RESERVED", f"Reserved, awaiting confirmation, for some of that time{where}."
+                "RESERVED", f"Reserved while another customer pays, for some of that time{where}."
             )
         return answer("BOOKED", f"Booked for some of that time{where}.")
 

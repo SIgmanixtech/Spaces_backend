@@ -2,7 +2,12 @@
 
 from app.models.account import Account
 from app.models.activity import ActivityLog
-from app.models.agreement import ContractDocument, ContractSignedCopy, ContractTemplate
+from app.models.agreement import (
+    ContractAddendum,
+    ContractDocument,
+    ContractSignedCopy,
+    ContractTemplate,
+)
 from app.models.allocation import Allocation, AllocationClaim
 from app.models.amenity import Amenity, PropertyAmenity
 from app.models.asset import Asset
@@ -22,6 +27,7 @@ from app.models.file import StoredFile
 from app.models.invoice import Invoice, InvoiceLine, Payment
 from app.models.layout import Layout
 from app.models.meta import MetaLeadEvent, MetaLeadForm
+from app.models.payment_hold import PaymentHold
 from app.models.pricing import BillingProfile, PricingRule
 from app.models.property import Property
 from app.models.reimbursement import (
@@ -34,6 +40,7 @@ from app.models.tenant import Tenant, TenantOccupancy
 from app.models.user import AppUser
 
 __all__ = [
+    "PaymentHold",
     "ActivityLog",
     "Allocation",
     "AllocationClaim",
@@ -43,6 +50,7 @@ __all__ = [
     "BillingProfile",
     "CompanyProfile",
     "ContractDocument",
+    "ContractAddendum",
     "ContractSignedCopy",
     "ContractTemplate",
     "Booking",

@@ -21,7 +21,7 @@ from app.core.errors import BadRequestError
 from app.models.agreement import ContractDocument, ContractTemplate
 from app.models.company import CompanyProfile
 from app.models.crm import Proposal
-from app.models.enums import ContractType, DocumentStatus, TemplateStatus
+from app.models.enums import ContractCategory, ContractType, DocumentStatus, TemplateStatus
 from app.models.property import Property
 from app.models.tenant import TenantOccupancy
 from app.schemas.agreement import (
@@ -217,6 +217,10 @@ def upload_template(
             "{{ custom.<key> }}."
         ),
     ] = "[]",
+    category: Annotated[
+        ContractCategory | None,
+        Form(description="SPACE, OFFICE, GOVERNMENT, PARKING or COMMERCIAL (D9.2). Omit for all."),
+    ] = None,
 ) -> TemplateRead:
     data = file.file.read(MAX_TEMPLATE_BYTES + 1)
     if not data:
@@ -232,6 +236,7 @@ def upload_template(
             required_fields=[f.strip() for f in required_fields.split(",") if f.strip()],
             notes=notes,
             custom_fields=fields,
+            category=category,
         )
     )
 

@@ -54,6 +54,7 @@ from app.services.client_access import NOT_ACTIVATED
 from app.services.contracts import ContractService, effective_status, group_members
 from app.services.occupancy import business_today
 from app.services.pricing import PricingService, periods_in
+from app.services.rental_policy import can_book
 
 CANCELLABLE = (BookingStatus.PENDING, BookingStatus.CONFIRMED)
 TYPE_LABEL = {
@@ -134,9 +135,13 @@ class CustomerService:
         notes: str | None,
         group_id: uuid.UUID | None = None,
     ) -> CustomerBooking:
-        """Price and hold a space for the customer. The booking starts PENDING: an
-        administrator confirms it, as with every other booking."""
+        """A booking request: priced, PENDING, and reserving nothing until the property
+        team confirms it (12 Nov 2026). Only durations the matrix offers as bookings for
+        this kind of space are accepted (app/services/rental_policy.py)."""
         space, prop = catalogue.get_space(space_id)
+        allowed, why = can_book(space.space_type, billing_period)
+        if not allowed:
+            raise ConflictError(why or "This booking is not offered.")
         if start_at.tzinfo is None or end_at.tzinfo is None:
             raise BadRequestError("Give times with a time zone, e.g. 2026-11-02T09:00:00+05:30.")
         quantity = periods_in(billing_period, start_at, end_at)
@@ -607,6 +612,26 @@ class CustomerService:
         ContractService(self.session, self.user).cancel(row.id, "Withdrawn by the customer.")
         return self._contract(self.session.get(TenantOccupancy, row.id))
 
+    def ask_hold_extension(
+        self, contract_id: uuid.UUID, until: date, reason: str
+    ) -> CustomerContract:
+        """Ask the property team to hold a waiting request longer (D12.6). The team
+        approves or declines; nothing changes until then."""
+        tenant = self.tenant()
+        row = (
+            self.session.scalar(
+                select(TenantOccupancy).where(
+                    TenantOccupancy.id == contract_id, TenantOccupancy.tenant_id == tenant.id
+                )
+            )
+            if tenant
+            else None
+        )
+        if row is None:
+            raise NotFoundError("Contract not found.")
+        ContractService(self.session, self.user).ask_hold_extension(row, until, reason)
+        return self._contract(self.session.get(TenantOccupancy, row.id))
+
     def contracts(self) -> list[CustomerContract]:
         tenant = self.tenant()
         if tenant is None:
@@ -641,6 +666,9 @@ class CustomerService:
         return self._contract(row)
 
     def _contract(self, c: TenantOccupancy) -> CustomerContract:
+        holding = c.status == ContractStatus.PENDING and ContractService(
+            self.session, self.user
+        )._is_holding(c)
         prop = self.session.get(Property, c.property_id)
         space = self.session.get(Space, c.space_id) if c.space_id else None
         if space is None:
@@ -682,6 +710,16 @@ class CustomerService:
             security_deposit=float(c.security_deposit) if c.security_deposit is not None else None,
             currency=c.currency,
             terms=c.terms,
+            category=c.category,
+            hold_until=c.hold_until if holding else None,
+            hold_extension_requested_until=c.hold_extension_requested_until if holding else None,
+            lock_in_period=c.lock_in_period,
+            notice_period=c.notice_period,
+            renews_reference=self.session.scalar(
+                select(TenantOccupancy.reference).where(TenantOccupancy.id == c.renews_contract_id)
+            )
+            if c.renews_contract_id
+            else None,
         )
 
 
@@ -698,6 +736,12 @@ _ACTIONS = {
     "activated": "started",
     "extended": "was extended",
     "renewed": "was renewed",
+    "held": "is holding its space for you",
+    "hold_changed": "holds its space for longer",
+    "hold_expired": "no longer holds its space (the hold ended)",
+    "hold_released": "no longer holds its space",
+    "hold_extension_requested": "has a request for more time",
+    "hold_extension_declined": "will not be held longer",
     "terminated": "was ended",
 }
 

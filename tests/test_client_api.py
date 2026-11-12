@@ -270,11 +270,14 @@ def test_a_portion_lease_blocks_what_is_inside_it_and_not_the_other_portion(
     assert states["Floor 5"] == "UNAVAILABLE"  # not rentable
 
 
-def test_a_seat_booking_holds_only_that_seat(priya: TestClient, hub: dict) -> None:
+def test_a_seat_booking_holds_only_that_seat(api: TestClient, priya: TestClient, hub: dict) -> None:
     booking = book(priya, hub["seat1"])
     assert booking["status"] == "PENDING"
+    # A request reserves nothing (12 Nov 2026); confirmed, the seat is booked.
+    assert floor_states(TestClient(app), hub, MONDAY)["Seat 1"] == "AVAILABLE"
+    assert api.post(f"{V1}/bookings/{booking['id']}/confirm").status_code == 200
     states = floor_states(TestClient(app), hub, MONDAY)
-    assert states["Seat 1"] == "RESERVED"
+    assert states["Seat 1"] == "BOOKED"
     assert states["Seat 2"] == "AVAILABLE"
     assert states["Open Bay"] == "UNAVAILABLE" and states["Portion 5B"] == "UNAVAILABLE"
     assert states["Portion 5A"] == "AVAILABLE"
@@ -348,7 +351,7 @@ def test_admin_and_customer_permissions_do_not_overlap(api: TestClient, priya: T
 
 
 def test_customers_only_ever_see_their_own_bookings(
-    priya: TestClient, ravi: TestClient, hub: dict, db_session: Session
+    api: TestClient, priya: TestClient, ravi: TestClient, hub: dict, db_session: Session
 ) -> None:
     mine = book(priya, hub["seat1"], hours=3)
     assert mine["quoted_total"] == 300.0 and mine["billing_period"] == "HOURLY"
@@ -360,9 +363,10 @@ def test_customers_only_ever_see_their_own_bookings(
     assert ravi.get(f"{CUSTOMER}/bookings/{mine['id']}").status_code == 404
     assert ravi.post(f"{CUSTOMER}/bookings/{mine['id']}/cancel").status_code == 404
 
-    # Ravi wants the same seat: told it is reserved, never whose or which reference.
+    # Once confirmed, Ravi wanting the same seat is told it is taken, never by whom.
+    assert api.post(f"{V1}/bookings/{mine['id']}/confirm").status_code == 200
     refused = book(ravi, hub["seat1"], expected=409)
-    assert refused["detail"].startswith("Reserved")
+    assert refused["detail"].startswith("Booked")
     assert mine["reference"] not in str(refused) and "priya" not in str(refused).lower()
     assert "conflicts" not in refused
     book(ravi, hub["seat2"])  # the next seat is free
@@ -720,13 +724,14 @@ def test_a_held_floor_or_portion_holds_everything_inside_it(
                 "customer_name": "Whole-area hold",
                 "start_at": iso(start),
                 "end_at": iso(start + timedelta(hours=1)),
+                "status": "CONFIRMED",  # only confirmed bookings hold
             },
         )
 
-    # A pending hold on Portion 5A: everything in it is reserved, Portion 5B is not.
+    # A confirmed booking of Portion 5A: everything in it is taken, Portion 5B is not.
     hold(hub["5A"], MONDAY)
     states = floor_states(priya, hub, MONDAY)
-    assert (states["Portion 5A"], states["Cabin 1"]) == ("RESERVED", "RESERVED")
+    assert (states["Portion 5A"], states["Cabin 1"]) == ("BOOKED", "BOOKED")
     assert states["Seat 1"] == "AVAILABLE"
 
     # The whole floor made rentable and held: every space on it is reserved for that time.
@@ -737,9 +742,9 @@ def test_a_held_floor_or_portion_holds_everything_inside_it(
     hold(floor_root, later)
     states = floor_states(priya, hub, later)
     held = {name: status for name, status in states.items() if name != "Floor 5"}
-    assert held and set(held.values()) == {"RESERVED"}, held
+    assert held and set(held.values()) == {"BOOKED"}, held
     # Customers cannot book anything inside it for that time.
-    assert book(priya, hub["seat2"], start=later, expected=409)["detail"].startswith("Reserved")
+    assert book(priya, hub["seat2"], start=later, expected=409)["detail"].startswith("Booked")
 
 
 def test_free_spaces_lists_only_what_can_be_taken_by_floor(
@@ -770,9 +775,12 @@ def test_free_spaces_lists_only_what_can_be_taken_by_floor(
     assert seat["inside"] == "Open Bay" and seat["bookable"] is True
     assert seat["from_price"] == {"billing_period": "HOURLY", "amount": 100.0, "currency": "INR"}
 
-    # Seat 1 booked (pending) and Portion 5A held: they, what they hold, and what holds
-    # them, drop out.
-    book(priya, hub["seat1"])
+    # A request for Seat 1 reserves nothing: everything is still free.
+    seat_request = book(priya, hub["seat1"])
+    assert "Seat 1" in names(free())
+    # Seat 1 confirmed and Portion 5A booked: they, what they hold, and what holds them,
+    # drop out.
+    api.post(f"{V1}/bookings/{seat_request['id']}/confirm")
     post(
         api,
         "bookings",
@@ -782,6 +790,7 @@ def test_free_spaces_lists_only_what_can_be_taken_by_floor(
             "customer_name": "Hold",
             "start_at": iso(MONDAY),
             "end_at": iso(MONDAY + timedelta(hours=1)),
+            "status": "CONFIRMED",
         },
     )
     now_free = free()

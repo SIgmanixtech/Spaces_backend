@@ -92,7 +92,9 @@ class TenantStatus(StrEnum):
 
 
 class BookingStatus(StrEnum):
-    """Every status except CANCELLED holds the booking's time range."""
+    """Only CONFIRMED (and, for history, COMPLETED) bookings hold their time range. A
+    PENDING booking is a request: it reserves nothing until the property team confirms it,
+    and confirming checks the space again (owner decision, 12 Nov 2026; migration 0023)."""
 
     PENDING = "PENDING"
     CONFIRMED = "CONFIRMED"
@@ -139,6 +141,39 @@ class ContractType(StrEnum):
     COWORKING_LICENCE = "COWORKING_LICENCE"
 
 
+class ContractCategory(StrEnum):
+    """What the agreement is for (BR-011, owner decisions D8.1-D8.3 of 2 Nov 2026). A separate
+    field next to the agreement type; NULL on contracts and templates made before categories
+    (D8.6) until an administrator sets it."""
+
+    SPACE = "SPACE"
+    OFFICE = "OFFICE"
+    GOVERNMENT = "GOVERNMENT"
+    PARKING = "PARKING"
+    COMMERCIAL = "COMMERCIAL"
+
+
+# D10.1-D10.2: the details each category requires before approval and generation.
+CATEGORY_REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
+    "SPACE": (),
+    "OFFICE": ("occupants",),
+    "GOVERNMENT": ("government_department", "government_order_reference"),
+    "PARKING": ("vehicle_registration",),
+    "COMMERCIAL": ("expected_headcount",),
+}
+# D10.5-D10.6: categories that need an end date (fixed term). Others may be ongoing.
+CATEGORIES_NEEDING_END_DATE = ("GOVERNMENT", "COMMERCIAL")
+
+
+class AddendumStatus(StrEnum):
+    """An addendum changes the terms of the same contract (LC-3). Its new terms apply only
+    once it is signed by both parties (LC-4); until then the contract's terms stay."""
+
+    DRAFT = "DRAFT"
+    SIGNED = "SIGNED"
+    CANCELLED = "CANCELLED"
+
+
 class TemplateStatus(StrEnum):
     DRAFT = "DRAFT"
     ACTIVE = "ACTIVE"
@@ -177,6 +212,19 @@ HOLDING_CONTRACT_STATUSES = (ContractStatus.ACTIVE, ContractStatus.TERMINATED)
 class AllocationSource(StrEnum):
     BOOKING = "BOOKING"
     CONTRACT = "CONTRACT"
+    # A 10-minute checkout hold while the customer pays online (migration 0023).
+    PAYMENT_HOLD = "PAYMENT_HOLD"
+
+
+class PaymentHoldStatus(StrEnum):
+    """A temporary checkout hold (see app/models/payment_hold.py)."""
+
+    ACTIVE = "ACTIVE"
+    CONVERTED = "CONVERTED"
+    RELEASED = "RELEASED"
+    EXPIRED = "EXPIRED"
+    NEEDS_REVIEW = "NEEDS_REVIEW"
+    RESOLVED = "RESOLVED"
 
 
 class PricingTarget(StrEnum):
@@ -303,6 +351,8 @@ class LeadSource(StrEnum):
     EXCEL = "EXCEL"
     META_ADS = "META_ADS"
     OTHER = "OTHER"
+    # A long-term rental request a customer sent from the client app (12 Nov 2026).
+    CLIENT_APP = "CLIENT_APP"
 
 
 class LeadStage(StrEnum):

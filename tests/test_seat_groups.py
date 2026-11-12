@@ -104,8 +104,10 @@ def test_five_seats_book_together_and_become_one_contract(
     assert len({b["group_id"] for b in booked}) == 1 and booked[0]["group_size"] == 5
     assert all(b["status"] == "PENDING" for b in booked)
 
-    # All or nothing: Seat 5 is taken now, so a second customer booking Seats 5 and 6 gets
-    # neither, and Seat 6 stays free.
+    # All or nothing: once Seat 5 is confirmed, a second customer booking Seats 5 and 6 gets
+    # neither, and Seat 6 stays free. (Requests alone reserve nothing.)
+    seat5 = next(b for b in booked if b["space_name"] == "Seat 5")
+    assert api.post(f"{V1}/bookings/{seat5['id']}/confirm").status_code == 200
     clash = book_seats(ravi, tower["seats"][4:6], expected=409)
     assert "Seat 5" in clash["detail"]
     assert states(ravi, tower, MONDAY + timedelta(hours=2))["Seat 6"] == "AVAILABLE"

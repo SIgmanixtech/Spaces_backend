@@ -48,6 +48,14 @@ def migrations(migrated_database: None) -> Iterator[Config]:
     """Hand the test database back empty and at the latest revision, whatever the test did."""
     # Pooled connections may hold plans for a table shape that is about to change.
     dispose_engine()
+    # Every downgrade/upgrade cycle uses up column slots (0022 alone adds 13 to contracts),
+    # so check before each migration test, not only once per run, and rebuild the
+    # disposable schema when it is worn out (tests/conftest.py).
+    from tests.conftest import _rebuild_if_worn_out
+
+    _rebuild_if_worn_out()
+    command.upgrade(alembic_config(), "head")
+    dispose_engine()
     try:
         yield alembic_config()
     finally:

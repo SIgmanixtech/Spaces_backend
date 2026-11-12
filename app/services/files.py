@@ -28,7 +28,12 @@ from app.core.errors import (
     ServiceUnavailableError,
     UnsupportedMediaTypeError,
 )
-from app.models.agreement import ContractDocument, ContractSignedCopy, ContractTemplate
+from app.models.agreement import (
+    ContractAddendum,
+    ContractDocument,
+    ContractSignedCopy,
+    ContractTemplate,
+)
 from app.models.asset import Asset
 from app.models.building import Building
 from app.models.enums import FileKind
@@ -370,7 +375,7 @@ class FileService:
         )
         # Contract templates, generated agreements and signed copies (Phase 4B) live in
         # the same bucket.
-        for model in (ContractTemplate, ContractDocument, ContractSignedCopy):
+        for model in (ContractTemplate, ContractDocument, ContractSignedCopy, ContractAddendum):
             known.update(
                 self.session.scalars(
                     select(model.object_path).where(model.bucket == self.storage.bucket)

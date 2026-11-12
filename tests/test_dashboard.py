@@ -60,6 +60,8 @@ def test_summary_counts_each_property_once_by_derived_status(api: TestClient) ->
             "customer_name": "Priya Nair",
             "start_at": start.isoformat(),
             "end_at": (start + timedelta(hours=2)).isoformat(),
+            # A confirmed future booking reserves; a pending request would not (12 Nov 2026).
+            "status": "CONFIRMED",
         },
     )
     tenant = post(api, "tenants", {"name": "Acme Ltd"})

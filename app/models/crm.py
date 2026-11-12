@@ -26,6 +26,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     Sequence,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -58,6 +59,10 @@ class Lead(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         enum_check("budget_period", BillingPeriod),
         CheckConstraint("company_name IS NOT NULL OR contact_name IS NOT NULL", name="has_name"),
         CheckConstraint("capacity IS NULL OR capacity > 0", name="capacity_positive"),
+        CheckConstraint(
+            "requested_term_months IS NULL OR requested_term_months BETWEEN 1 AND 120",
+            name="term_months_range",
+        ),
         CheckConstraint("area_sqft IS NULL OR area_sqft > 0", name="area_positive"),
         CheckConstraint(
             "(budget_amount IS NULL) = (budget_period IS NULL)"
@@ -102,6 +107,8 @@ class Lead(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     budget_period: Mapped[str | None] = mapped_column(String(16))
     currency: Mapped[str] = mapped_column(String(3), nullable=False, server_default="INR")
     desired_start_date: Mapped[date | None] = mapped_column(Date)
+    # A client-app rental request: the term asked for, in months (migration 0023).
+    requested_term_months: Mapped[int | None] = mapped_column(SmallInteger)
     owner_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("app_users.id", ondelete="SET NULL"), index=True
     )

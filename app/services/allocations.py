@@ -59,7 +59,13 @@ class Conflict:
     relation: str
 
     def describe(self) -> str:
-        what = "booked" if self.kind == "BOOKING" else f"held by contract {self.reference}"
+        what = (
+            "booked"
+            if self.kind == "BOOKING"
+            else "held while another customer pays"
+            if self.kind == "PAYMENT_HOLD"
+            else f"held by contract {self.reference}"
+        )
         if self.relation == "same":
             if self.kind == "CONTRACT":
                 return (
@@ -145,6 +151,7 @@ class AllocationEngine:
         """Live holds that a hold of ``space_id`` over ``period`` would collide with:
         any hold of the space itself or of something inside it (they all claim the
         space), and exclusive holds of any space containing it."""
+        self.release_expired_holds()
         ancestors = chain(parent_map(self.session, [space_id]), space_id)
         statement = (
             select(Allocation)
@@ -186,6 +193,18 @@ class AllocationEngine:
                 )
             )
         }
+        from app.models.payment_hold import PaymentHold
+
+        holds = {
+            h.id: h
+            for h in self.session.scalars(
+                select(PaymentHold).where(
+                    PaymentHold.id.in_(
+                        {a.payment_hold_id for a in allocations if a.payment_hold_id}
+                    )
+                )
+            )
+        }
         contracts = {
             c.id: c
             for c in self.session.scalars(
@@ -197,7 +216,11 @@ class AllocationEngine:
         out = []
         for a in sorted(allocations, key=lambda a: a.period.lower):
             record: Booking | TenantOccupancy | None = (
-                bookings.get(a.booking_id) if a.booking_id else contracts.get(a.contract_id)  # type: ignore[arg-type]
+                bookings.get(a.booking_id)
+                if a.booking_id
+                else holds.get(a.payment_hold_id)
+                if a.payment_hold_id
+                else contracts.get(a.contract_id)  # type: ignore[arg-type]
             )
             relation = (
                 "same"
@@ -233,10 +256,12 @@ class AllocationEngine:
     ) -> Allocation:
         """Holds the space and claims its chain. Raises ConflictError, naming what is in
         the way, when the database refuses the hold."""
+        self.release_expired_holds()
         allocation = Allocation(
             source_type=source,
             booking_id=record_id if source == AllocationSource.BOOKING else None,
             contract_id=record_id if source == AllocationSource.CONTRACT else None,
+            payment_hold_id=record_id if source == AllocationSource.PAYMENT_HOLD else None,
             property_id=property_id,
             space_id=space_id,
             period=period,
@@ -258,6 +283,67 @@ class AllocationEngine:
                 None,
             )
         self._flush(allocation.space_id, period, {allocation.id})
+
+    def release_expired_holds(self) -> int:
+        """Release the space of every pending contract whose hold has run out (owner
+        decisions D12.4-D12.6: a pending contract keeps its space until ``hold_until``,
+        inclusive). Runs before every availability check and every new hold, so an expired
+        hold never blocks anyone, with nothing scheduled; ``release-expired-holds`` (CLI)
+        does the same on demand. The contract stays PENDING and can be held again or
+        approved if its space is still free. Returns how many holds were released."""
+        from app.models.enums import ContractStatus
+        from app.services.base import log_activity
+        from app.services.occupancy import business_today
+
+        rows = self.session.execute(
+            select(Allocation, TenantOccupancy)
+            .join(TenantOccupancy, TenantOccupancy.id == Allocation.contract_id)
+            .where(
+                Allocation.is_active,
+                TenantOccupancy.status == ContractStatus.PENDING,
+                TenantOccupancy.hold_until.is_not(None),
+                TenantOccupancy.hold_until < business_today(),
+            )
+        ).all()
+        released = len(rows) + self._expire_payment_holds()
+        for allocation, contract in rows:
+            self.release(allocation, "HOLD_EXPIRED")
+            log_activity(
+                self.session,
+                None,
+                action="hold_expired",
+                entity_type="contracts",
+                entity_id=contract.id,
+                property_id=contract.property_id,
+                message=f"Contract {contract.reference}: the hold ended on "
+                f"{contract.hold_until.isoformat()} and the space was released automatically.",
+            )
+        return released
+
+    def _expire_payment_holds(self) -> int:
+        """Checkout holds whose 10 minutes have passed (server time) stop holding at once,
+        whether or not the customer is still on the page."""
+        from app.models.enums import PaymentHoldStatus
+        from app.models.payment_hold import PaymentHold
+
+        now = datetime.now(UTC)
+        rows = self.session.execute(
+            select(Allocation, PaymentHold)
+            .join(PaymentHold, PaymentHold.id == Allocation.payment_hold_id)
+            .where(
+                Allocation.is_active,
+                PaymentHold.status == PaymentHoldStatus.ACTIVE,
+                PaymentHold.expires_at <= now,
+            )
+        ).all()
+        for allocation, hold in rows:
+            self.release(allocation, "PAYMENT_HOLD_EXPIRED")
+            hold.status = PaymentHoldStatus.EXPIRED
+            hold.released_at = now
+            hold.release_reason = "EXPIRED"
+        if rows:
+            self.session.flush()
+        return len(rows)
 
     def release(self, allocation: Allocation, reason: str) -> None:
         """Stops the hold; the allocation and its claims stay as history."""

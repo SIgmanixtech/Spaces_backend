@@ -176,7 +176,7 @@ def test_simultaneous_portion_and_desk_requests_never_both_succeed(
                         "customer_name": "Racer",
                         "start_at": start,
                         "end_at": start + HOUR,
-                        "status": BookingStatus.PENDING,
+                        "status": BookingStatus.CONFIRMED,  # holding bookings
                     }
                 )
                 outcomes.append("booked")

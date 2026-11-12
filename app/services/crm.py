@@ -209,6 +209,9 @@ class CrmService:
                 select(Lead.id).where(Lead.id.in_(ids), is_prospect_clause(Lead.id))
             )
         )
+        from app.services.lead_progress import pipeline_stages
+
+        stages = pipeline_stages(self.session, leads)
         today = business_today()
         counts = {
             lead_id: (open_, overdue)
@@ -258,6 +261,7 @@ class CrmService:
                     tenant_name=tenants.get(lead.tenant_id) if lead.tenant_id else None,
                     tenant_linked_at=lead.tenant_linked_at,
                     is_prospect=lead.id in prospects,
+                    pipeline_stage=stages[lead.id],
                     created_at=lead.created_at,
                     updated_at=lead.updated_at,
                 )

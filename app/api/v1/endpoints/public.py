@@ -12,6 +12,7 @@ from fastapi import APIRouter, Query
 from app.api.dependencies import AppSettings, DbSession, ListParams, OptionalCustomer
 from app.api.responses import NOT_FOUND, VALIDATION_ERROR, _error
 from app.api.v1.endpoints.files import StorageFactory
+from app.core.config import get_settings
 from app.models.enums import BillingPeriod, SpaceType
 from app.schemas.client import (
     Capabilities,
@@ -37,15 +38,16 @@ BAD_RANGE = {400: _error("The times are missing a time zone, out of order or too
 
 @router.get("/capabilities", response_model=Capabilities, summary="What the client app can use")
 def capabilities() -> Capabilities:
-    """Features the backend offers customers. Invoices, online payment and QR access are
-    not implemented, and the client app shows them as unavailable."""
+    """Features the backend offers customers. Invoices are read-only (issued invoices,
+    payment history and agreed deposits). Online payment and QR access are not implemented,
+    and the client app shows them as unavailable."""
     return Capabilities(
         customer_registration=False,
         password_recovery=True,
         bookings=True,
         contracts=True,
-        invoices=False,
-        online_payments=False,
+        invoices=True,
+        online_payments=get_settings().online_payments_enabled,
         qr_access=False,
     )
 

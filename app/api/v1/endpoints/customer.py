@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends
+from sqlalchemy.orm import Session
 
 from app.api.dependencies import CurrentCustomer, DbSession, ListParams, get_token_verifier
 from app.api.responses import NOT_FOUND, PROTECTED, VALIDATION_ERROR, _error
@@ -32,6 +33,7 @@ from app.schemas.client import (
     CustomerGroupBookingCreate,
     CustomerProfile,
     CustomerProfileUpdate,
+    HoldExtensionRequest,
     OtpRequest,
     OtpResult,
     OtpVerify,
@@ -40,7 +42,10 @@ from app.schemas.client import (
     PhoneOtpVerify,
     SetPassword,
 )
+from app.schemas.client_billing import CustomerDeposit, CustomerInvoice, CustomerPayment
+from app.schemas.client_rentals import RentalEstimate, RentalRequestCreate, RentalRequestRead
 from app.schemas.common import Page
+from app.schemas.payment_hold import CheckoutStart, PaymentHoldRead
 from app.services.agreements import AgreementService
 from app.services.auth import (
     SupabaseAuthGateway,
@@ -50,11 +55,15 @@ from app.services.auth import (
 )
 from app.services.catalogue import CatalogueService
 from app.services.client_access import NOT_ACTIVATED, ClientAccessService
+from app.services.customer_billing import CustomerBillingService
+from app.services.customer_rentals import CustomerRentalService
 from app.services.customers import (
     CustomerService,
     finish_code_sign_in,
     normalize_phone,
 )
+from app.services.payment_holds import PaymentHoldService
+from app.services.rental_policy import Duration
 
 # Mounted at /client (and at the older /customer) by the v1 router.
 router = APIRouter(tags=["Client: customer"])
@@ -318,6 +327,20 @@ def withdraw_contract(
     return CustomerService(session, user).withdraw_contract(contract_id)
 
 
+@router.post(
+    "/contracts/{contract_id}/hold-extension",
+    response_model=CustomerContract,
+    responses={**PROTECTED, **NOT_FOUND, 409: _error("The request no longer holds its space.")},
+    summary="Ask for my contract request to be held longer",
+)
+def ask_hold_extension(
+    user: CurrentCustomer, session: DbSession, contract_id: uuid.UUID, body: HoldExtensionRequest
+) -> CustomerContract:
+    """The property team approves (the hold moves) or declines (it stays). Until then
+    the request keeps its current hold date."""
+    return CustomerService(session, user).ask_hold_extension(contract_id, body.until, body.reason)
+
+
 @router.get(
     "/contracts/{contract_id}/agreement",
     response_model=AgreementRead,
@@ -407,3 +430,152 @@ def my_contract(
     user: CurrentCustomer, session: DbSession, contract_id: uuid.UUID
 ) -> CustomerContract:
     return CustomerService(session, user).contract(contract_id)
+
+
+# --- invoices, payments and deposits (read-only) ------------------------------------------
+
+
+def _billing(user: AppUser, session: Session) -> CustomerBillingService:
+    return CustomerBillingService(session, user, CustomerService(session, user)._own_tenant())
+
+
+@router.get(
+    "/invoices",
+    response_model=list[CustomerInvoice],
+    responses=PROTECTED,
+    summary="My invoices",
+)
+def my_invoices(user: CurrentCustomer, session: DbSession) -> list[CustomerInvoice]:
+    """Issued (and cancelled) invoices only, newest first. Paid amounts count verified
+    payments only; recorded payments show as awaiting verification."""
+    return _billing(user, session).invoices()
+
+
+@router.get(
+    "/invoices/{invoice_id}",
+    response_model=CustomerInvoice,
+    responses={**PROTECTED, **NOT_FOUND},
+    summary="One of my invoices, with its payments",
+)
+def my_invoice(user: CurrentCustomer, session: DbSession, invoice_id: uuid.UUID) -> CustomerInvoice:
+    return _billing(user, session).invoice(invoice_id)
+
+
+@router.get(
+    "/payments",
+    response_model=list[CustomerPayment],
+    responses=PROTECTED,
+    summary="My payment history",
+)
+def my_payments(user: CurrentCustomer, session: DbSession) -> list[CustomerPayment]:
+    """Every payment recorded against my issued invoices, with its status."""
+    return _billing(user, session).payments()
+
+
+@router.get(
+    "/deposits",
+    response_model=list[CustomerDeposit],
+    responses=PROTECTED,
+    summary="Security deposits in my contracts",
+)
+def my_deposits(user: CurrentCustomer, session: DbSession) -> list[CustomerDeposit]:
+    """The deposit agreed in each approved contract (what was agreed, not a receipt)."""
+    return _billing(user, session).deposits()
+
+
+# --- long-term rental requests (become CRM leads) ----------------------------------------
+
+
+def _rentals(user: AppUser, session: Session) -> CustomerRentalService:
+    return CustomerRentalService(session, user, CustomerService(session, user)._own_tenant())
+
+
+@router.post(
+    "/rental-requests/estimate",
+    response_model=RentalEstimate,
+    responses={**PROTECTED, **NOT_FOUND, 409: _error("Not offered for this space.")},
+    summary="Estimate a long-term rental",
+)
+def estimate_rental(
+    user: CurrentCustomer, session: DbSession, body: RentalRequestCreate
+) -> RentalEstimate:
+    """At the space's monthly price × months, with its availability. Holds nothing."""
+    return _rentals(user, session).estimate(
+        body.space_id, Duration(body.duration), body.start_date, body.count
+    )
+
+
+@router.post(
+    "/rental-requests",
+    response_model=RentalRequestRead,
+    status_code=201,
+    responses={**PROTECTED, **NOT_FOUND, 409: _error("Not offered, taken, or already asked.")},
+    summary="Ask for a long-term rental (monthly, quarterly, half-yearly, yearly)",
+)
+def request_rental(
+    user: CurrentCustomer, session: DbSession, body: RentalRequestCreate
+) -> RentalRequestRead:
+    """Becomes a lead for the property team (CRM). Nothing is held or signed; a contract is
+    prepared only after the property team reaches Space Selected."""
+    return _rentals(user, session).request(
+        body.space_id, Duration(body.duration), body.start_date, body.count, body.notes
+    )
+
+
+@router.get(
+    "/rental-requests",
+    response_model=list[RentalRequestRead],
+    responses=PROTECTED,
+    summary="My long-term rental requests",
+)
+def my_rental_requests(user: CurrentCustomer, session: DbSession) -> list[RentalRequestRead]:
+    return _rentals(user, session).list()
+
+
+# --- checkout holds (online payment; off until a gateway is approved) ---------------------
+
+
+@router.post(
+    "/checkout-holds",
+    response_model=PaymentHoldRead,
+    status_code=201,
+    responses={**PROTECTED, **NOT_FOUND, 409: _error("Taken, not offered, or payments off.")},
+    summary="Start checkout: hold the space for 10 minutes",
+)
+def start_checkout(
+    user: CurrentCustomer, session: DbSession, body: CheckoutStart
+) -> PaymentHoldRead:
+    tenant = CustomerService(session, user)._own_tenant()
+    hold = PaymentHoldService(session, user).start(
+        tenant,
+        space_id=body.space_id,
+        billing_period=body.billing_period,
+        start_at=body.start_at,
+        end_at=body.end_at,
+        notes=body.notes,
+    )
+    return PaymentHoldRead.model_validate(hold)
+
+
+@router.get(
+    "/checkout-holds/{hold_id}",
+    response_model=PaymentHoldRead,
+    responses={**PROTECTED, **NOT_FOUND},
+    summary="My checkout hold",
+)
+def my_checkout(user: CurrentCustomer, session: DbSession, hold_id: uuid.UUID) -> PaymentHoldRead:
+    tenant = CustomerService(session, user)._own_tenant()
+    return PaymentHoldRead.model_validate(PaymentHoldService(session, user).get(tenant, hold_id))
+
+
+@router.post(
+    "/checkout-holds/{hold_id}/cancel",
+    response_model=PaymentHoldRead,
+    responses={**PROTECTED, **NOT_FOUND},
+    summary="Cancel my checkout and release the space",
+)
+def cancel_checkout(
+    user: CurrentCustomer, session: DbSession, hold_id: uuid.UUID
+) -> PaymentHoldRead:
+    tenant = CustomerService(session, user)._own_tenant()
+    return PaymentHoldRead.model_validate(PaymentHoldService(session, user).cancel(tenant, hold_id))

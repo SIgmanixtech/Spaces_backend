@@ -3,10 +3,12 @@
 BR-029, BR-030). Needs the migrated test database (like every API test here)."""
 
 from datetime import timedelta
+from decimal import Decimal
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
+from app.models import TenantOccupancy
 from app.services.occupancy import business_today
 from tests.test_agreements import make_docx, sign_with_copy, storage, upload  # noqa: F401
 from tests.test_client_access import agreement, contract_for, new_tenant
@@ -68,7 +70,9 @@ def test_only_admins_reach_billing(client: TestClient, priya: TestClient) -> Non
     for who, status in ((client, 401), (priya, 403)):
         for path in ("invoices", "payments", "billing/balances", "billing/deposits"):
             assert who.get(f"{ADMIN}/{path}").status_code == status
-    assert priya.get(f"{V1}/client/invoices").status_code == 404
+    # Customers read only their own issued invoices (client app); none yet here.
+    mine = priya.get(f"{V1}/client/invoices")
+    assert (mine.status_code, mine.json()) == (200, [])
 
 
 def test_invoice_lifecycle_lines_suggestions_and_payments(
@@ -264,7 +268,13 @@ def test_balances_deposits_and_spaces(
     api: TestClient, hub: dict, storage: object, db_session: Session
 ) -> None:
     account, contract = account_with_contract(api, hub)
-    api.patch(f"{ADMIN}/contracts/{contract['id']}", json={"security_deposit": "36000"})
+    # The agreement is signed, so the deposit changes only by an addendum (LC-3, Phase B2):
+    # the API refuses a direct edit. This test is about balances, so set it on the record.
+    refused = api.patch(f"{ADMIN}/contracts/{contract['id']}", json={"security_deposit": "36000"})
+    assert refused.status_code == 409 and "addendum" in refused.text
+    row = db_session.get(TenantOccupancy, contract["id"])
+    row.security_deposit = Decimal("36000")
+    db_session.commit()
     empty = api.get(f"{ADMIN}/billing/balances").json()
     assert [(b["account_id"], float(b["invoiced"]), float(b["deposits_held"])) for b in empty] == [
         (account, 0.0, 36000.0)

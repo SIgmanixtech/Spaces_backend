@@ -50,8 +50,10 @@ from app.models.space import Space
 from app.models.tenant import Tenant, TenantOccupancy
 from app.services.hierarchy import chain, parent_map
 
-# Bookings that still hold a future or in-progress claim on a space.
+# Bookings still open: a request waiting for the property team, or a confirmed booking.
 OPEN_BOOKING_STATUSES = (BookingStatus.PENDING, BookingStatus.CONFIRMED)
+# Bookings that hold their time (12 Nov 2026: a pending request reserves nothing).
+HOLDING_BOOKING_STATUSES = (BookingStatus.CONFIRMED, BookingStatus.COMPLETED)
 
 
 def business_today(now: datetime | None = None) -> date:
@@ -124,7 +126,7 @@ def property_occupancy(
             select(Booking.property_id)
             .where(
                 Booking.property_id.in_(ids),
-                Booking.status.in_(OPEN_BOOKING_STATUSES),
+                Booking.status == BookingStatus.CONFIRMED,  # pending reserves nothing
                 Booking.end_at > now,
             )
             .distinct()
@@ -207,7 +209,7 @@ def space_statuses(
     for space_id, status, start_at in session.execute(
         select(Booking.space_id, Booking.status, Booking.start_at).where(
             Booking.space_id.in_(family_ids),
-            Booking.status.in_(OPEN_BOOKING_STATUSES),
+            Booking.status == BookingStatus.CONFIRMED,  # pending reserves nothing
             Booking.end_at > now,
         )
     ):

@@ -363,6 +363,29 @@ def test_signed_copy_upload_marks_signed_without_activating(
         ).status_code
         == 400
     )
+    # D11.3: one party's signature is not enough; nothing is recorded as signed.
+    for only, missing in (
+        ('[{"party": "TENANT", "name": "Asha Rao"}]', "SIGMANIX"),
+        ('[{"party": "COMPANY", "name": "Kiran Rao"}]', "the tenant"),
+    ):
+        refused = api.post(
+            f"{doc_url}/signed-copy",
+            data={**form, "signers": only},
+            files={"file": ("s.pdf", SIGNED_PDF)},
+        )
+        assert refused.status_code == 400 and missing in refused.json()["detail"], refused.text
+    assert api.get(url).json()["documents"][0]["status"] == "APPROVED"
+    late = (business_today() + timedelta(days=1)).isoformat()
+    future_signer = api.post(
+        f"{doc_url}/signed-copy",
+        data={
+            **form,
+            "signers": '[{"party": "TENANT", "name": "Asha Rao", "signed_on": "' + late + '"},'
+            ' {"party": "COMPANY", "name": "Kiran Rao"}]',
+        },
+        files={"file": ("s.pdf", SIGNED_PDF)},
+    )
+    assert future_signer.status_code == 400 and "Signer 1" in future_signer.json()["detail"]
 
     holds_before = holds(db_session)
     copy = api.post(
@@ -378,6 +401,8 @@ def test_signed_copy_upload_marks_signed_without_activating(
         "MANUAL_UPLOAD",
     )
     assert [s["party"] for s in signed["signers"]] == ["TENANT", "COMPANY"]
+    # Each signer keeps a date (the copy's when not given) and may name their company.
+    assert {s["signed_on"] for s in signed["signers"]} == {business_today().isoformat()}
     plan = api.get(url).json()
     assert plan["documents"][0]["status"] == "SIGNED"
     assert plan["documents"][0]["signed_copy"]["id"] == signed["id"]
@@ -483,6 +508,12 @@ def test_contract_from_an_accepted_proposal(
         f"{CRM}/proposals/{proposal['id']}/accept",
         json={"accepted_on": today.isoformat(), "acceptance_note": "Email"},
     )
+    # Accepted, but the lead is still at Lead Created: refused (owner decision L-3).
+    early = api.post(url)
+    assert early.status_code == 409 and "Space Selected" in early.json()["detail"]
+    for stage in ("LEAD_REVIEWED", "SPACE_SELECTED"):
+        moved = api.post(f"{CRM}/leads/{made_lead['id']}/stage", json={"stage": stage})
+        assert moved.status_code == 200, moved.text
     no_tenant = api.post(url)
     assert (
         no_tenant.status_code == 409 and "Link the lead to a tenant" in no_tenant.json()["detail"]

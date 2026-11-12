@@ -10,15 +10,20 @@ from app.api.dependencies import CurrentAdmin, DbSession, ListParams
 from app.api.responses import NOT_FOUND, PROTECTED, _error
 from app.schemas.common import Page
 from app.schemas.contract import (
+    BookingConvert,
     ContractAvailability,
     ContractCancel,
     ContractCreate,
     ContractExtend,
+    ContractHold,
     ContractRead,
+    ContractReason,
+    ContractRenew,
     ContractScope,
     ContractState,
     ContractTerminate,
     ContractUpdate,
+    PricingSuggestion,
 )
 from app.schemas.dashboard import ActivityEntry
 from app.services.contracts import ContractService
@@ -98,6 +103,54 @@ def contract_availability(
     )
 
 
+@router.get(
+    "/ending-soon",
+    response_model=list[ContractRead],
+    summary="Approved contracts ending soon",
+)
+def contracts_ending_soon(
+    admin: CurrentAdmin,
+    session: DbSession,
+    days: Annotated[int, Query(ge=1, le=366, description="Window in days (LC-7: 60).")] = 60,
+) -> list[ContractRead]:
+    """Approved contracts whose last day falls within `days`, soonest first, with any
+    renewal already made (`renewed_by_reference`)."""
+    return ContractService(session, admin).ending_soon(days)
+
+
+@router.get(
+    "/pricing-suggestion",
+    response_model=PricingSuggestion,
+    summary="Rent and deposit suggested from a space's pricing",
+)
+def pricing_suggestion(
+    admin: CurrentAdmin, session: DbSession, space_id: uuid.UUID, start_date: date
+) -> PricingSuggestion:
+    """D10.3-D10.4: the space's monthly pricing on `start_date`. Suggestions only; the
+    admin may change them, and a deposit of zero is allowed."""
+    return PricingSuggestion(
+        **ContractService(session, admin).suggest_pricing(space_id, start_date)
+    )
+
+
+@router.post(
+    "/from-booking/{booking_id}",
+    response_model=ContractRead,
+    status_code=201,
+    responses={**NOT_FOUND, **HELD},
+    summary="Turn a monthly booking into a pending contract",
+)
+def convert_booking(
+    admin: CurrentAdmin, session: DbSession, booking_id: uuid.UUID, body: BookingConvert
+) -> ContractRead:
+    """D12.1-D12.3: only monthly bookings (hourly, daily and weekly stay bookings). The
+    contract is prefilled from the booking and the space's pricing and holds the space
+    for 7 days; the booking is kept, reads as CONVERTED and links to the contract."""
+    return ContractService(session, admin).convert_booking(
+        booking_id, body.model_dump(exclude_unset=True)
+    )
+
+
 @router.post(
     "",
     response_model=ContractRead,
@@ -127,8 +180,9 @@ def get_contract(admin: CurrentAdmin, session: DbSession, contract_id: uuid.UUID
 def update_contract(
     admin: CurrentAdmin, session: DbSession, contract_id: uuid.UUID, body: ContractUpdate
 ) -> ContractRead:
-    """Rent, deposit, currency, terms and notes at any time; dates only while PENDING.
-    The status changes only through activate, cancel, terminate and extend."""
+    """Rent, deposit, currency, terms, notes, category and its details; dates only while
+    PENDING. Once the agreement is signed, terms change only by an addendum (409). The
+    status changes only through activate, cancel, terminate and extend."""
     return ContractService(session, admin).update(contract_id, body.model_dump(exclude_unset=True))
 
 
@@ -173,8 +227,13 @@ def cancel_contract(
     body: ContractCancel | None = None,
 ) -> ContractRead:
     """For a pending contract, or an active one that has not started. Releases the
-    space; the contract is kept as CANCELLED. A started contract is terminated instead."""
-    return ContractService(session, admin).cancel(contract_id, body.reason if body else None)
+    space; the contract is kept as CANCELLED. A started contract is terminated instead.
+    Linked Parking contracts are cancelled too unless `include_parking` is false."""
+    return ContractService(session, admin).cancel(
+        contract_id,
+        body.reason if body else None,
+        include_parking=body.include_parking if body else True,
+    )
 
 
 @router.post(
@@ -189,7 +248,7 @@ def terminate_contract(
     """The contract holds through `termination_date` and the space is free from the
     next day. The agreed end date is kept as `original_end_date`."""
     return ContractService(session, admin).terminate(
-        contract_id, body.termination_date, body.reason
+        contract_id, body.termination_date, body.reason, include_parking=body.include_parking
     )
 
 
@@ -202,9 +261,65 @@ def terminate_contract(
 def extend_contract(
     admin: CurrentAdmin, session: DbSession, contract_id: uuid.UUID, body: ContractExtend
 ) -> ContractRead:
-    """Extends (or renews, or shortens) the contract. Refused with 409, naming what is
-    in the way, if the longer period is held by someone else."""
-    return ContractService(session, admin).extend(contract_id, body.end_date)
+    """A date-only change: extends or shortens the contract. Refused with 409, naming
+    what is in the way, if the longer period is held by someone else. Changed terms need
+    an addendum; a new term with new conditions is a renewal."""
+    return ContractService(session, admin).extend(
+        contract_id, body.end_date, include_parking=body.include_parking
+    )
+
+
+@router.post(
+    "/{contract_id}/renew",
+    response_model=ContractRead,
+    status_code=201,
+    responses={**NOT_FOUND, **HELD},
+    summary="Renew a contract as a new linked contract",
+)
+def renew_contract(
+    admin: CurrentAdmin, session: DbSession, contract_id: uuid.UUID, body: ContractRenew
+) -> ContractRead:
+    """LC-2: a new PENDING contract from the day after this one ends, linked to it.
+    Returns the new contract."""
+    return ContractService(session, admin).renew(contract_id, body.model_dump(exclude_unset=True))
+
+
+@router.post(
+    "/{contract_id}/hold",
+    response_model=ContractRead,
+    responses={**NOT_FOUND, **HELD},
+    summary="Hold a pending contract's space, or move its hold",
+)
+def hold_contract(
+    admin: CurrentAdmin, session: DbSession, contract_id: uuid.UUID, body: ContractHold
+) -> ContractRead:
+    """D12.4-D12.5: the space is held until `hold_until` (default 7 days), then released
+    automatically. Also approves a customer's request for more time."""
+    return ContractService(session, admin).hold(contract_id, body.hold_until, body.reason)
+
+
+@router.post(
+    "/{contract_id}/release-hold",
+    response_model=ContractRead,
+    responses=NOT_FOUND,
+    summary="Release a pending contract's hold",
+)
+def release_hold(
+    admin: CurrentAdmin, session: DbSession, contract_id: uuid.UUID, body: ContractReason
+) -> ContractRead:
+    return ContractService(session, admin).release_hold(contract_id, body.reason)
+
+
+@router.post(
+    "/{contract_id}/decline-hold-extension",
+    response_model=ContractRead,
+    responses=NOT_FOUND,
+    summary="Decline a customer's request for more time",
+)
+def decline_hold_extension(
+    admin: CurrentAdmin, session: DbSession, contract_id: uuid.UUID, body: ContractReason
+) -> ContractRead:
+    return ContractService(session, admin).decline_hold_extension(contract_id, body.reason)
 
 
 @router.get(

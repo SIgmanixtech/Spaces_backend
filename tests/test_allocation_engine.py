@@ -194,7 +194,11 @@ def test_c_booking_one_cabin_blocks_only_that_cabin(api: TestClient, floor5: dic
     for key in ("B-cabin2", "B-desk", "B-hall", "A-cabin", "A-hall"):
         book(api, floor5[key])
     book(api, floor5["B-cabin"], START + HOUR)  # touching, not overlapping
-    assert first["status"] == "PENDING"
+    assert first["status"] == "CONFIRMED"
+    # A pending request holds nothing (12 Nov 2026): the same time can be asked for.
+    request = book(api, floor5["B-cabin2"], START + 3 * HOUR, status="PENDING")
+    book(api, floor5["B-cabin2"], START + 3 * HOUR, status="PENDING")
+    assert request["status"] == "PENDING"
 
 
 # --- Scenario D: conflicts in both directions -----------------------------------------
@@ -468,7 +472,8 @@ def _booking(space: dict, start: datetime) -> Callable[[Session], object]:
             "customer_name": "Racer",
             "start_at": start,
             "end_at": start + HOUR,
-            "status": BookingStatus.PENDING,
+            # A confirmed booking holds its time; a pending request would hold nothing.
+            "status": BookingStatus.CONFIRMED,
         }
     )
 

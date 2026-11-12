@@ -101,6 +101,18 @@ def sync_meta_leads() -> int:
     return 1 if any(f.error for f in result.forms) else 0
 
 
+def release_expired_holds() -> int:
+    """Release the space of pending contracts whose hold has ended (D12.4-D12.6). Holds
+    are also released before every availability check, so this is optional; safe to repeat."""
+    from app.services.allocations import AllocationEngine
+
+    with get_session_factory()() as session:
+        released = AllocationEngine(session).release_expired_holds()
+        session.commit()
+    print(f"Released {released} expired hold(s).")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(prog="python -m app.cli")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -111,8 +123,11 @@ def main() -> int:
     purge.add_argument("--delete", action="store_true", help="remove them, not just list them")
     purge.add_argument("--min-age-hours", type=float, default=1.0)
     commands.add_parser("sync-meta-leads", help="import new Meta Ads leads (for a scheduler)")
+    commands.add_parser("release-expired-holds", help="free spaces of expired contract holds")
     args = parser.parse_args()
 
+    if args.command == "release-expired-holds":
+        return release_expired_holds()
     if args.command == "grant-admin":
         return grant_admin(args.email)
     if args.command == "revoke-access":

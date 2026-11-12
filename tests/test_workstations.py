@@ -180,6 +180,7 @@ def test_booking_the_workstation_holds_its_chairs_and_chairs_are_never_booked_al
                 "property_id": hub["property"]["id"],
                 "space_id": space["id"],
                 "customer_name": "Walk-in",
+                "status": "CONFIRMED",  # only confirmed bookings hold
                 **window,
             },
         )

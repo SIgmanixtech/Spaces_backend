@@ -7,7 +7,7 @@ Reimbursement data is entered here; nothing comes from the application's own def
 except the six seeded expense types."""
 
 import uuid
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -145,7 +145,7 @@ def test_estimates_show_three_charge_types_and_bookings_are_unchanged(
             "space_id": hub["seat1"]["id"],
             "billing_period": "DAILY",
             "start_at": iso(MONDAY),
-            "end_at": iso(MONDAY.replace(day=MONDAY.day + 1)),
+            "end_at": iso(MONDAY + timedelta(days=1)),
         },
     )
     term(
@@ -192,7 +192,7 @@ def test_estimates_show_three_charge_types_and_bookings_are_unchanged(
             "space_id": hub["seat1"]["id"],
             "billing_period": "DAILY",
             "start_at": iso(MONDAY),
-            "end_at": iso(MONDAY.replace(day=MONDAY.day + 1)),
+            "end_at": iso(MONDAY + timedelta(days=1)),
         },
     )
     assert quote_after.status_code == quote_before.status_code == 200

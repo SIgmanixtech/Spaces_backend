@@ -118,7 +118,7 @@ def search(client: TestClient, query: str) -> dict:
 
 
 def test_results_are_real_spaces_with_real_prices_and_availability(
-    priya: TestClient, hub: dict
+    api: TestClient, priya: TestClient, hub: dict
 ) -> None:
     day = MONDAY.date().isoformat()
     found = search(priya, f"seat on {day} between 9 am and 10 am")
@@ -133,8 +133,12 @@ def test_results_are_real_spaces_with_real_prices_and_availability(
     assert seat["price"] == {"billing_period": "HOURLY", "amount": 100.0, "currency": "INR"}
     assert seat["available"] is True and "free for the requested time" in seat["reasons"]
 
-    # Book Seat 1 for 9-10 am: it drops out for that hour only.
-    book(priya, hub["seat1"])
+    # A request for Seat 1 holds nothing (12 Nov 2026): it stays free until confirmed.
+    request = book(priya, hub["seat1"])
+    still = search(priya, f"seat on {day} between 9 am and 10 am")["results"]
+    assert {r["space_name"] for r in still} == {"Seat 1", "Seat 2"}
+    # Confirmed for 9-10 am: it drops out for that hour only.
+    assert api.post(f"{V1}/bookings/{request['id']}/confirm").status_code == 200
     taken = search(priya, f"seat on {day} between 9 am and 10 am")["results"]
     assert [r["space_name"] for r in taken] == ["Seat 2"]
     later = search(priya, f"seat on {day} 2:30 pm to 3:30 pm")["results"]
@@ -153,6 +157,7 @@ def test_held_portions_hide_what_is_inside_and_no_date_means_no_check(
             "customer_name": "Hold",
             "start_at": iso(MONDAY),
             "end_at": iso(MONDAY + timedelta(hours=1)),
+            "status": "CONFIRMED",
         },
     )
     day = MONDAY.date().isoformat()
