@@ -312,6 +312,10 @@ class BookingService:
         )
         flush(self.session)
         self._hold(booking)
+        # 13 Nov 2026: a confirmed customer booking makes the customer a tenant.
+        from app.services.customer_journey import tenant_for_confirmed_booking
+
+        tenant_for_confirmed_booking(self.session, self.actor, booking)
         return self._finish("confirmed", booking)
 
     def complete(self, booking_id: uuid.UUID) -> BookingRead:

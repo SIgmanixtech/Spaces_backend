@@ -23,6 +23,7 @@ from app.core.errors import (
     UnauthorizedError,
 )
 from app.core.security import TokenVerifier
+from app.models.enums import UserRole
 from app.models.user import AppUser
 from app.schemas.auth import CurrentUserRead, SessionRead
 
@@ -342,7 +343,13 @@ def open_session(
     if user is None or not user.is_active:
         raise ForbiddenError("Your account is not authorized to use this application.")
     # Customers may sign in without a tenancy (they register themselves to book); what
-    # needs a tenancy (contracts, invoices...) is checked by those endpoints.
+    # needs a tenancy (contracts, invoices...) is checked by those endpoints. Every client-app
+    # customer is a CRM lead (13 Nov 2026): make sure theirs exists.
+    if user.role == UserRole.CUSTOMER:
+        from app.services.customer_journey import ensure_customer_lead
+
+        if ensure_customer_lead(session, user) is not None:
+            session.commit()
     return SessionRead(
         access_token=supabase_session.access_token,
         expires_in=supabase_session.expires_in,

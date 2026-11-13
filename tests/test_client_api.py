@@ -327,6 +327,13 @@ def test_customers_register_themselves_as_customers_only(
             "+91 98450 12345",
         )
         assert db_session.scalar(select(func.count()).select_from(Tenant)) == 0
+        # Everyone who signs up is a CRM lead (13 Nov 2026).
+        from app.models.crm import Lead
+
+        leads = db_session.scalars(select(Lead).where(Lead.created_by == user.id)).all()
+        assert [(lead.source, lead.contact_email) for lead in leads] == [
+            ("CLIENT_APP", "meera@example.com")
+        ]
         again = client.post(f"{CUSTOMER}/auth/register", json=body)
         assert (again.status_code, again.json()) == (202, first.json())
         assert len(gateway.signed_up) == 1  # no duplicate account

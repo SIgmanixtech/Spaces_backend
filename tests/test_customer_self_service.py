@@ -77,6 +77,12 @@ def test_sign_in_needs_no_tenancy_but_admins_never_use_the_client_app(
         ),
     )
     assert read.user.role == UserRole.CUSTOMER
+    # Signing in makes sure the customer is a lead (13 Nov 2026).
+    db_session.expire_all()
+    assert (
+        db_session.scalar(select(func.count()).select_from(Lead).where(Lead.created_by == user.id))
+        == 1
+    )
     # Admin accounts are refused by every customer endpoint, tenancy or not.
     for path in ("me", "bookings", "rental-requests", "contracts", "invoices"):
         assert api.get(f"{CUSTOMER}/{path}").status_code == 403, path
@@ -123,3 +129,71 @@ def test_inviting_a_tenant_links_the_customer_who_already_registered(
     assert client.get(f"{CUSTOMER}/me").json()["is_tenant"] is True
     mine = [b["id"] for b in client.get(f"{CUSTOMER}/bookings").json()["items"]]
     assert booked.json()["id"] in mine
+
+
+def test_every_customer_is_a_lead_and_a_confirmed_booking_makes_them_a_tenant(
+    verifier: None, signing_key, hub: dict, db_session: Session, api: TestClient
+) -> None:
+    """13 Nov 2026: signing up or in makes a CRM lead; a confirmed booking (payment checked
+    by the property team) makes the customer a tenant, linked to their lead and sign-in."""
+    from app.services.customer_journey import ensure_customer_lead
+
+    user, client = customer(db_session, signing_key, "lead@example.com")
+    lead = ensure_customer_lead(db_session, user)
+    db_session.commit()
+    assert (lead.source, lead.contact_email, lead.tenant_id) == (
+        "CLIENT_APP",
+        "lead@example.com",
+        None,
+    )
+    assert ensure_customer_lead(db_session, user).id == lead.id  # once per customer
+    assert api.get(f"{V1}/admin/crm/leads/{lead.id}").status_code == 200
+
+    def book(hour: int) -> dict:
+        made = client.post(
+            f"{CUSTOMER}/bookings",
+            json={
+                "space_id": hub["seat1"]["id"],
+                "billing_period": "HOURLY",
+                "start_at": f"2030-01-07T{hour:02d}:00:00+05:30",
+                "end_at": f"2030-01-07T{hour + 1:02d}:00:00+05:30",
+            },
+        )
+        assert made.status_code == 201, made.text
+        return made.json()
+
+    first, second = book(9), book(11)
+    assert db_session.scalar(select(func.count()).select_from(Tenant)) == 0  # not on request
+    assert client.get(f"{CUSTOMER}/me").json()["is_tenant"] is False
+    assert api.post(f"{V1}/bookings/{first['id']}/confirm").status_code == 200
+    db_session.expire_all()
+    tenant = db_session.scalar(select(Tenant).where(Tenant.user_id == user.id))
+    assert tenant is not None and tenant.client_activated_at is not None
+    assert db_session.get(Booking, uuid.UUID(first["id"])).tenant_id == tenant.id
+    assert db_session.get(Lead, lead.id).tenant_id == tenant.id
+    assert client.get(f"{CUSTOMER}/me").json()["is_tenant"] is True
+    assert client.get(f"{CUSTOMER}/contracts").status_code == 200
+    # A second confirmed booking keeps the same tenant.
+    assert api.post(f"{V1}/bookings/{second['id']}/confirm").status_code == 200
+    assert db_session.scalar(select(func.count()).select_from(Tenant)) == 1
+    mine = {b["id"] for b in client.get(f"{CUSTOMER}/bookings").json()["items"]}
+    assert {first["id"], second["id"]} <= mine
+
+
+def test_a_long_term_request_uses_the_customers_own_lead(
+    verifier: None, signing_key, hub: dict, db_session: Session
+) -> None:
+    from app.services.customer_journey import ensure_customer_lead
+
+    user, client = customer(db_session, signing_key, "own@example.com")
+    lead = ensure_customer_lead(db_session, user)
+    db_session.commit()
+    assert client.get(f"{CUSTOMER}/rental-requests").json() == []  # sign-up lead alone
+    start = business_today() + timedelta(days=20)
+    made = client.post(
+        f"{CUSTOMER}/rental-requests",
+        json={"space_id": hub["cabin"]["id"], "duration": "QUARTERLY", "start_date": str(start)},
+    )
+    assert made.status_code == 201, made.text
+    assert made.json()["id"] == str(lead.id)
+    assert db_session.scalar(select(func.count()).select_from(Lead)) == 1

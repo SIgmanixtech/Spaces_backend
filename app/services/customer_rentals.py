@@ -129,8 +129,27 @@ class CustomerRentalService:
                         f"You already asked for {space.name} ({lead.reference}). The property "
                         "team will contact you."
                     )
+        from app.services.customer_journey import customer_lead
+
+        own = customer_lead(self.session, self.user)
+        if own is not None and self._interest(own.id) is None and own.stage == "LEAD_CREATED":
+            # The customer's sign-up lead becomes this request.
+            for key, value in {
+                "property_id": prop.id,
+                "space_type": space.space_type,
+                "capacity": space.capacity,
+                "desired_start_date": start_date,
+                "currency": est.currency,
+                "requested_term_months": est.months,
+                "company_name": own.company_name
+                or (self.tenant.company_name if self.tenant else None),
+            }.items():
+                setattr(own, key, value)
+            lead = own
+        else:
+            lead = None
         crm = CrmService(self.session, self.user)
-        lead = crm.insert(
+        lead = lead or crm.insert(
             {
                 "source": LeadSource.CLIENT_APP,
                 "company_name": self.tenant.company_name if self.tenant else None,
@@ -178,7 +197,8 @@ class CustomerRentalService:
         return self._read(lead)
 
     def list(self) -> list[RentalRequestRead]:
-        return [self._read(lead) for lead in self._mine()]
+        # Only leads with a space asked for: the sign-up lead alone is not a request.
+        return [self._read(lead) for lead in self._mine() if self._interest(lead.id)]
 
     def _mine(self) -> list[Lead]:
         return list(

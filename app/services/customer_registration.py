@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 from app.models.enums import UserRole
 from app.models.user import AppUser
 from app.services.base import commit
+from app.services.customer_journey import ensure_customer_lead
 
 
 class CustomerRegistrationService:
@@ -40,13 +41,15 @@ class CustomerRegistrationService:
             return
         if phone and self.session.scalar(select(AppUser.id).where(AppUser.phone == phone)):
             phone = None  # another account uses this number; keep the registration
-        self.session.add(
-            AppUser(
-                id=uuid.UUID(user_id),
-                email=email,
-                full_name=name,
-                phone=phone,
-                role=UserRole.CUSTOMER,  # always; the visitor never chooses a role
-            )
+        user = AppUser(
+            id=uuid.UUID(user_id),
+            email=email,
+            full_name=name,
+            phone=phone,
+            role=UserRole.CUSTOMER,  # always; the visitor never chooses a role
         )
+        self.session.add(user)
+        self.session.flush()
+        # 13 Nov 2026: everyone who signs up is a CRM lead.
+        ensure_customer_lead(self.session, user)
         commit(self.session)
