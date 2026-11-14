@@ -253,7 +253,8 @@ def cancel_booking(
     "/otp/request", status_code=202, responses=VALIDATION_ERROR, summary="Email a sign-in code"
 )
 def request_otp(body: OtpRequest, gateway: Gateway) -> dict[str, str]:
-    """Public. Emails a 6-digit sign-in code. A new address gets an account on first sign-in."""
+    """Public. Emails a one-time sign-in code (its length is a Supabase setting). Only existing
+    accounts get one; an unknown address gets the same answer and nothing is sent."""
     gateway.send_otp(str(body.email).strip().lower())
     if getattr(gateway, "test_mode", False):
         return {
