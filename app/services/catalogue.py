@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.errors import AppError, BadRequestError, NotFoundError
+from app.models.allocation import AllocationClaim
 from app.models.amenity import Amenity, PropertyAmenity
 from app.models.building import Building, Floor
 from app.models.enums import (
@@ -67,10 +68,11 @@ from app.schemas.client import (
 from app.schemas.common import ListQuery
 from app.schemas.layout import LayoutElement
 from app.schemas.pricing import EffectivePrice
-from app.services.allocations import AllocationEngine, booking_period
+from app.services.allocations import AllocationEngine, _overlaps, booking_period
 from app.services.amenities import LEVEL_WHERE, offered_anywhere
 from app.services.base import page_of
 from app.services.files import FileService
+from app.services.hierarchy import chain, parent_map
 from app.services.pricing import PricingService, is_priceable, periods_in
 from app.services.rental_policy import TERM_MONTHS
 from app.services.rental_policy import options as rental_options
@@ -129,6 +131,9 @@ class CatalogueService:
         self.session = session
         self._storage_factory = storage_factory
         self._storage: ObjectStorage | None | bool = False
+        # Effective prices per property, worked out once per request (a property page
+        # needs them for its card, its floors and its spaces).
+        self._effective_prices: dict[uuid.UUID, Any] = {}
 
     # --- properties --------------------------------------------------------------
 
@@ -436,6 +441,19 @@ class CatalogueService:
                 text_search([Property.name, Property.city, Property.address], search)
             )
         floors: list[FreeFloor] = []
+        # One query for every space held at some point in the range (any hold, any mode).
+        # A space with no hold on itself or on anything it sits inside is free; only the
+        # others need the full check, one by one (most spaces skip it). Expired contract
+        # holds are released first, as each full check would.
+        AllocationEngine(self.session).release_expired_holds()
+        held = set(
+            self.session.scalars(
+                select(AllocationClaim.space_id).where(
+                    AllocationClaim.is_active,
+                    _overlaps(AllocationClaim.period, booking_period(start_at, end_at)),
+                )
+            )
+        )
         for prop in self.session.scalars(statement):
             if prop.status != PropertyStatus.ACTIVE:
                 continue
@@ -455,6 +473,7 @@ class CatalogueService:
             ):
                 spaces = self._public_spaces(Space.floor_id == floor.id)
                 by_id = {s.id: s for s in spaces}
+                parents = parent_map(self.session, [s.id for s in spaces]) if held else {}
                 free = []
                 for s in spaces:
                     if not is_priceable(s):
@@ -463,7 +482,10 @@ class CatalogueService:
                         continue
                     if min_capacity is not None and (s.capacity or 0) < min_capacity:
                         continue
-                    if not self._status(prop, s, by_id, start_at, end_at).available:
+                    maybe_held = s.id in held or any(a in held for a in chain(parents, s.id))
+                    if not self._status(
+                        prop, s, by_id, start_at, end_at, check_holds=maybe_held
+                    ).available:
                         continue
                     parent = by_id.get(s.parent_space_id) if s.parent_space_id else None
                     free.append(
@@ -589,7 +611,12 @@ class CatalogueService:
         on_floor: dict[uuid.UUID, Space],
         start_at: datetime,
         end_at: datetime,
+        *,
+        check_holds: bool = True,
     ) -> SpaceAvailability:
+        """``check_holds=False`` when the caller already knows nothing in the range holds
+        this space or anything containing it."""
+
         def answer(status: str, message: str) -> SpaceAvailability:
             return SpaceAvailability(
                 space_id=space.id,
@@ -609,6 +636,8 @@ class CatalogueService:
             if parent.operational_status != SpaceOperationalStatus.ACTIVE:
                 return answer("UNAVAILABLE", "This space is not open for bookings.")
             parent = on_floor.get(parent.parent_space_id) if parent.parent_space_id else None
+        if not check_holds:
+            return answer("AVAILABLE", "Available for the whole of that time.")
         conflicts = AllocationEngine(self.session).conflicts(
             space.id, booking_period(start_at, end_at)
         )
@@ -635,7 +664,7 @@ class CatalogueService:
         return answer("BOOKED", f"Booked for some of that time{where}.")
 
     def _prices(self, prop: Property) -> dict[uuid.UUID, list[PublicPrice]]:
-        pricing = PricingService(self.session).effective(prop.id)
+        pricing = self._effective(prop.id)
         return {
             sp.space_id: [_public_price(p) for p in sp.prices] for sp in pricing.spaces if sp.prices
         }
@@ -664,7 +693,7 @@ class CatalogueService:
         that can be booked online (not CUSTOM)."""
         best: dict[BillingPeriod, StartingPrice] = {}
         priced: set[uuid.UUID] = set()
-        pricing = PricingService(self.session).effective(prop.id)
+        pricing = self._effective(prop.id)
         for sp in pricing.spaces:
             if any(p.billing_period != BillingPeriod.CUSTOM for p in sp.prices):
                 priced.add(sp.space_id)
@@ -682,6 +711,13 @@ class CatalogueService:
         order = list(BillingPeriod)
         ranked = sorted(best.values(), key=lambda s: order.index(s.billing_period))
         return ranked, priced
+
+    def _effective(self, property_id: uuid.UUID) -> Any:
+        if property_id not in self._effective_prices:
+            self._effective_prices[property_id] = PricingService(self.session).effective(
+                property_id
+            )
+        return self._effective_prices[property_id]
 
     def _images(self, *where: ColumnElement[bool]) -> list[PublicImage]:
         storage = self._lazy_storage()
