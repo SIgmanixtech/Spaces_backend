@@ -229,19 +229,37 @@ class ClientAccessService:
             ),
         }
 
-    def activate(self, user: AppUser, access_token: str, password: str) -> Tenant:
-        """The invited (or existing) tenant sets a password from their link."""
+    def activate(self, user: AppUser, access_token: str, password: str) -> Tenant | None:
+        """The invited (or existing) tenant sets a password from their link; a customer who
+        registered themselves sets a new one from a reset link."""
+        if user.role != UserRole.CUSTOMER:
+            raise ForbiddenError(NOT_ACTIVATED)
         tenant = self.session.scalar(
             select(Tenant).where(Tenant.user_id == user.id).with_for_update()
         )
         if (
-            user.role != UserRole.CUSTOMER
-            or tenant is None
+            tenant is None
             or tenant.client_invited_at is None
             or tenant.status != TenantStatus.ACTIVE
             or tenant.archived_at is not None
         ):
-            raise ForbiddenError(NOT_ACTIVATED)
+            # 14 Nov 2026: customers register themselves, so a customer without an invited
+            # tenancy may reset their own password, if their account is active. Nothing
+            # about any tenancy changes.
+            if not user.is_active:
+                raise ForbiddenError(NOT_ACTIVATED)
+            self.gateway.set_password(access_token, password)
+            log_activity(
+                self.session,
+                user,
+                action="password_changed",
+                entity_type="app_users",
+                entity_id=user.id,
+                property_id=None,
+                message=f'Customer "{user.full_name or user.email}" set a new password.',
+            )
+            commit(self.session)
+            return None
         self.gateway.set_password(access_token, password)
         first_time = tenant.client_activated_at is None
         if first_time:

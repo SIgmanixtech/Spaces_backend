@@ -219,7 +219,7 @@ def test_setting_a_password_activates_and_only_then_the_client_app_opens(
     assert db_session.scalar(select(func.count()).select_from(AppUser)) == 2  # admin + tenant
 
 
-def test_set_password_is_only_for_invited_tenants(
+def test_set_password_is_for_invited_tenants_and_customers_resetting_their_own(
     api: TestClient,
     admin_user: AppUser,
     invites: InviteAuth,
@@ -238,15 +238,23 @@ def test_set_password_is_only_for_invited_tenants(
 
     assert attempt(make_token(signing_key, uuid.uuid4())) == 403  # no such account here
     assert attempt(make_token(signing_key, admin_user.id)) == 403  # the administrator
-    stranger = AppUser(id=uuid.uuid4(), email="s@example.com", role=UserRole.CUSTOMER)
-    db_session.add(stranger)
+    blocked = AppUser(
+        id=uuid.uuid4(), email="b@example.com", role=UserRole.CUSTOMER, is_active=False
+    )
+    customer = AppUser(id=uuid.uuid4(), email="s@example.com", role=UserRole.CUSTOMER)
+    db_session.add_all([blocked, customer])
     db_session.commit()
-    assert attempt(make_token(signing_key, stranger.id)) == 403  # never invited
-    forged = make_token(ec.generate_private_key(ec.SECP256R1()), stranger.id)
+    assert attempt(make_token(signing_key, blocked.id)) == 403  # a deactivated account
+    forged = make_token(ec.generate_private_key(ec.SECP256R1()), customer.id)
     assert attempt(forged) == 401
-    expired = make_token(signing_key, stranger.id, exp=datetime.now(UTC) - timedelta(minutes=1))
+    expired = make_token(signing_key, customer.id, exp=datetime.now(UTC) - timedelta(minutes=1))
     assert attempt(expired) == 401
     assert invites.passwords == {}
+    # 14 Nov 2026: a customer who registered themselves (no tenancy) resets their password.
+    assert attempt(make_token(signing_key, customer.id)) == 200
+    assert invites.passwords == {customer.id: "a-good-password"}
+    db_session.expire_all()
+    assert db_session.scalar(select(func.count()).select_from(Tenant)) == 0  # none created
 
 
 def test_an_email_used_by_another_account_cannot_be_invited(

@@ -103,8 +103,9 @@ def password_recovery(body: PasswordRecovery, gateway: Gateway) -> dict[str, str
 def set_password(
     body: SetPassword, session: DbSession, gateway: Gateway, verifier: Verifier
 ) -> SessionRead:
-    """Public (the link's token is the proof). Only a tenant the property team invited can
-    set a password here; the first time activates their client access. Returns a session."""
+    """Public (the link's token is the proof). An invited tenant sets a password (the first
+    time activates their client access); any active customer sets a new one from a reset
+    link. Returns a session."""
     claims = verifier.verify(body.access_token)
     user = session.get(AppUser, claims.subject)
     if user is None:
