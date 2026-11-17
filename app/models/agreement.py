@@ -273,3 +273,69 @@ class ContractAddendum(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("app_users.id", ondelete="SET NULL")
     )
+
+
+class BookingDocument(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """An agreement for a one-time booking, such as a Conference Room Usage Agreement
+    (17 Nov 2026, migration 0026). Kept apart from contract documents: a booking is not a
+    contract and never becomes a lease or membership through this record.
+
+    The DOCX is stored once and never rewritten. Status moves GENERATED -> APPROVED ->
+    SIGNED by explicit administrator actions; SIGNED needs the uploaded signed copy (PDF).
+    A signed document is never replaced. The same file uploaded twice for a booking is the
+    same document (unique by booking and SHA-256)."""
+
+    __tablename__ = "booking_documents"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('GENERATED', 'APPROVED', 'SIGNED', 'SUPERSEDED')", name="status_valid"
+        ),
+        CheckConstraint("agreement_type IN ('CONFERENCE_ROOM_USAGE')", name="agreement_type_valid"),
+        CheckConstraint("size_bytes > 0", name="size_positive"),
+        CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name="sha256_hex"),
+        CheckConstraint(
+            "status <> 'SIGNED' OR (signed_object_path IS NOT NULL AND signed_on IS NOT NULL"
+            " AND jsonb_array_length(signers) > 0)",
+            name="signed_has_evidence",
+        ),
+        UniqueConstraint("booking_id", "sha256", name="uq_booking_documents_file"),
+    )
+
+    reference: Mapped[str] = mapped_column(String(40), unique=True, nullable=False)
+    booking_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("bookings.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    agreement_type: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="CONFERENCE_ROOM_USAGE"
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=DocumentStatus.GENERATED.value
+    )
+    bucket: Mapped[str] = mapped_column(String(100), nullable=False)
+    object_path: Mapped[str] = mapped_column(String(500), nullable=False, unique=True)
+    file_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    generated_on: Mapped[date] = mapped_column(Date, nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text)
+    uploaded_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("app_users.id", ondelete="SET NULL")
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    approved_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("app_users.id", ondelete="SET NULL")
+    )
+    signed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The signed copy (paper signature evidence, PDF).
+    signed_object_path: Mapped[str | None] = mapped_column(String(500), unique=True)
+    signed_file_name: Mapped[str | None] = mapped_column(String(255))
+    signed_size_bytes: Mapped[int | None] = mapped_column(BigInteger)
+    signed_sha256: Mapped[str | None] = mapped_column(String(64))
+    signed_on: Mapped[date | None] = mapped_column(Date)
+    signers: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    signed_uploaded_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("app_users.id", ondelete="SET NULL")
+    )

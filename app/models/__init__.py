@@ -3,6 +3,7 @@
 from app.models.account import Account
 from app.models.activity import ActivityLog
 from app.models.agreement import (
+    BookingDocument,
     ContractAddendum,
     ContractDocument,
     ContractSignedCopy,
@@ -40,6 +41,7 @@ from app.models.tenant import Tenant, TenantOccupancy
 from app.models.user import AppUser
 
 __all__ = [
+    "BookingDocument",
     "PaymentHold",
     "ActivityLog",
     "Allocation",
