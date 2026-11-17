@@ -42,6 +42,17 @@ class CategoryFields(InputSchema):
     notice_period: str | None = Field(
         default=None, max_length=100, description="As printed on the agreement (D10.8)."
     )
+    payment_due_day: int | None = Field(
+        default=None, ge=1, le=28, description="Day of the month the fee is due (coworking)."
+    )
+    tds_percent: Decimal | None = Field(
+        default=None,
+        ge=0,
+        le=100,
+        max_digits=5,
+        decimal_places=2,
+        description="TDS the member deducts, per agreement. Empty: no TDS.",
+    )
 
 
 class ContractCreate(CategoryFields):
@@ -100,6 +111,8 @@ class ContractUpdate(UpdateSchema):
     vehicle_registration: str | None = Field(default=None, max_length=20)
     lock_in_period: str | None = Field(default=None, max_length=100)
     notice_period: str | None = Field(default=None, max_length=100)
+    payment_due_day: int | None = Field(default=None, ge=1, le=28)
+    tds_percent: Decimal | None = Field(default=None, ge=0, le=100, max_digits=5, decimal_places=2)
 
 
 class ContractCancel(InputSchema):
@@ -253,6 +266,8 @@ class ContractRead(ReadSchema):
     vehicle_registration: str | None = None
     lock_in_period: str | None = None
     notice_period: str | None = None
+    payment_due_day: int | None = None
+    tds_percent: Decimal | None = None
     booking_id: uuid.UUID | None = None
     missing_for_approval: list[str] = Field(
         default_factory=list,

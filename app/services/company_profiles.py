@@ -28,6 +28,14 @@ FIELD_NAMES = {
     "pan": "PAN",
     "cin": "CIN",
     "notes": "notes",
+    "phone": "phone",
+    "email": "email",
+    "bank_name": "bank name",
+    "bank_account_name": "bank account name",
+    "bank_account_number": "bank account number",
+    "bank_ifsc": "IFSC",
+    "bank_branch": "bank branch",
+    "upi_id": "UPI ID",
 }
 
 

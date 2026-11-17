@@ -1,10 +1,13 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Form, Query, Response, UploadFile
+from fastapi.exceptions import RequestValidationError
+from pydantic import ValidationError
 
 from app.api.dependencies import CurrentAdmin, DbSession, ListParams
 from app.api.responses import CONFLICT, NOT_FOUND, PROTECTED, _error
+from app.api.v1.endpoints.files import Storage, StorageFactory
 from app.models.enums import OccupancyStatus, TenantStatus
 from app.schemas.common import Page, RemovalRead
 from app.schemas.crm import DuplicateMatch
@@ -19,9 +22,22 @@ from app.schemas.tenant import (
     TenantRead,
     TenantUpdate,
 )
+from app.schemas.tenant_onboarding import (
+    AssignmentInput,
+    AssignmentQuote,
+    OnboardResult,
+    SignatureLink,
+    TenantOnboard,
+)
 from app.services.auth import SupabaseAuthGateway, get_auth_gateway
 from app.services.client_access import ClientAccessService
 from app.services.crm import CrmService
+from app.services.tenant_onboarding import TenantOnboardingService
+from app.services.tenant_signature import (
+    SIGNATURE_MAX_BYTES,
+    TenantSignatureService,
+    check_signature,
+)
 from app.services.tenants import TenantService
 
 Gateway = Annotated[SupabaseAuthGateway, Depends(get_auth_gateway)]
@@ -63,6 +79,99 @@ def list_tenants(
 def create_tenant(admin: CurrentAdmin, session: DbSession, body: TenantCreate) -> TenantRead:
     service = TenantService(session, admin)
     return service.to_read([service.create(body.model_dump())])[0]
+
+
+@router.post(
+    "/assignment-quote",
+    response_model=AssignmentQuote,
+    responses={**NOT_FOUND},
+    summary="Preview a space for a new tenant: availability, pricing and the first invoice",
+)
+def assignment_quote(
+    admin: CurrentAdmin, session: DbSession, body: AssignmentInput
+) -> AssignmentQuote:
+    """Nothing is saved. Prices come from the space's monthly pricing rule (rent and
+    maintenance per sq ft or fixed, tax and deposit as the rule says); the invoice preview
+    is the draft that adding the tenant would create."""
+    return TenantOnboardingService(session, admin).quote(body.model_dump())
+
+
+@router.post(
+    "/onboard",
+    response_model=OnboardResult,
+    status_code=201,
+    responses={
+        **NOT_FOUND,
+        409: _error(
+            "A tenant with the same email or phone exists (code duplicate_tenant, matches in "
+            "conflicts), or the space is taken."
+        ),
+    },
+    summary="Add a tenant (or link an existing one) with a space, account and first invoice",
+)
+def onboard_tenant(
+    admin: CurrentAdmin,
+    session: DbSession,
+    storage: StorageFactory,
+    data: Annotated[str, Form(description="TenantOnboard as JSON.")],
+    signature: UploadFile | None = None,
+) -> OnboardResult:
+    """Multipart form: `data` (JSON) and an optional `signature` (PNG or JPG, at most
+    2 MB). One transaction: the tenant, an ACTIVE contract for the space (the allocation
+    engine's checks apply), the account and a DRAFT initial invoice for one month from the
+    start date. Repeating the same request returns the same records."""
+    try:
+        body = TenantOnboard.model_validate_json(data)
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors(include_url=False)) from None
+    upload = None
+    if signature is not None:
+        upload = check_signature(signature.file.read(SIGNATURE_MAX_BYTES + 1))
+    return TenantOnboardingService(session, admin, storage).onboard(body.model_dump(), upload)
+
+
+@router.get(
+    "/{tenant_id}/signature",
+    response_model=SignatureLink,
+    responses=NOT_FOUND,
+    summary="A short-lived link to the tenant's signature image",
+)
+def get_signature(
+    admin: CurrentAdmin, session: DbSession, storage: Storage, tenant_id: uuid.UUID
+) -> SignatureLink:
+    return TenantSignatureService(session, admin, storage).link(tenant_id)
+
+
+@router.put(
+    "/{tenant_id}/signature",
+    response_model=SignatureLink,
+    responses=NOT_FOUND,
+    summary="Add or replace the tenant's signature image",
+)
+def put_signature(
+    admin: CurrentAdmin,
+    session: DbSession,
+    storage: Storage,
+    tenant_id: uuid.UUID,
+    signature: UploadFile,
+) -> SignatureLink:
+    """PNG or JPG, at most 2 MB. A signature asset only: nothing is marked as signed."""
+    return TenantSignatureService(session, admin, storage).replace(
+        tenant_id, signature.file.read(SIGNATURE_MAX_BYTES + 1)
+    )
+
+
+@router.delete(
+    "/{tenant_id}/signature",
+    status_code=204,
+    responses=NOT_FOUND,
+    summary="Remove the tenant's signature image",
+)
+def delete_signature(
+    admin: CurrentAdmin, session: DbSession, storage: Storage, tenant_id: uuid.UUID
+) -> Response:
+    TenantSignatureService(session, admin, storage).remove(tenant_id)
+    return Response(status_code=204)
 
 
 @router.post(

@@ -13,6 +13,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     Sequence,
+    SmallInteger,
     String,
     Text,
     text,
@@ -36,6 +37,21 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, ArchivableMixin, Base):
         CheckConstraint(
             "client_activated_at IS NULL OR client_invited_at IS NOT NULL",
             name="activated_after_invited",
+        ),
+        CheckConstraint(
+            "(signature_path IS NULL) = (signature_content_type IS NULL)"
+            " AND (signature_path IS NULL) = (signature_size_bytes IS NULL)"
+            " AND (signature_path IS NULL) = (signature_uploaded_at IS NULL)",
+            name="signature_complete",
+        ),
+        CheckConstraint(
+            "signature_content_type IS NULL"
+            " OR signature_content_type IN ('image/png', 'image/jpeg')",
+            name="signature_type",
+        ),
+        CheckConstraint(
+            "personal_pan IS NULL OR personal_pan ~ '^[A-Z]{5}[0-9]{4}[A-Z]$'",
+            name="personal_pan_format",
         ),
     )
 
@@ -67,6 +83,18 @@ class Tenant(UUIDPrimaryKeyMixin, TimestampMixin, ArchivableMixin, Base):
     gstin: Mapped[str | None] = mapped_column(String(15))
     pan: Mapped[str | None] = mapped_column(String(10))
     cin: Mapped[str | None] = mapped_column(String(21))
+    # The member's own PAN (17 Nov 2026), never the company's (that is ``pan``).
+    personal_pan: Mapped[str | None] = mapped_column(String(10))
+    # A PNG or JPEG image of the signature (14 Nov 2026), stored privately; read only
+    # through a short-lived signed link, by administrators. A signature asset only: it never
+    # marks a contract or agreement as signed.
+    signature_path: Mapped[str | None] = mapped_column(String(500), unique=True)
+    signature_content_type: Mapped[str | None] = mapped_column(String(40))
+    signature_size_bytes: Mapped[int | None] = mapped_column(Integer)
+    signature_uploaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    signature_uploaded_by: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("app_users.id", ondelete="SET NULL")
+    )
 
 
 class TenantOccupancy(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -125,6 +153,12 @@ class TenantOccupancy(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "(expected_headcount IS NULL OR expected_headcount > 0)"
             " AND (occupants IS NULL OR occupants > 0)",
             name="counts_positive",
+        ),
+        CheckConstraint(
+            "payment_due_day IS NULL OR payment_due_day BETWEEN 1 AND 28", name="due_day_range"
+        ),
+        CheckConstraint(
+            "tds_percent IS NULL OR (tds_percent >= 0 AND tds_percent <= 100)", name="tds_range"
         ),
         Index(
             "ix_tenant_occupancies_main_contract_id",
@@ -240,3 +274,7 @@ class TenantOccupancy(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     # D10.8: printed on the agreement only; text, so no unit or calculation is assumed.
     lock_in_period: Mapped[str | None] = mapped_column(String(100))
     notice_period: Mapped[str | None] = mapped_column(String(100))
+    # Coworking agreements (17 Nov 2026), as the administrator enters them per contract:
+    # the day of the month the fee is due, and the TDS the member deducts (empty: none).
+    payment_due_day: Mapped[int | None] = mapped_column(SmallInteger)
+    tds_percent: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))

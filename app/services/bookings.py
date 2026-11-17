@@ -220,6 +220,16 @@ class BookingService:
             raise ConflictError("The space is not rentable, so it cannot be booked.")
         if values.get("tenant_id") is not None:
             require(self.session, Tenant, values["tenant_id"], "Tenant")
+        elif values.get("channel", BookingChannel.ADMIN) != BookingChannel.CUSTOMER:
+            # 14 Nov 2026: the admin names the customer; an existing tenant with that email
+            # or phone is linked now, so a tenant's next booking never makes a second one.
+            from app.services.customer_journey import tenant_by_contact
+
+            known = tenant_by_contact(
+                self.session, values.get("customer_email"), values.get("customer_phone")
+            )
+            if known is not None:
+                values = {**values, "tenant_id": known.id}
         self._check_window(values["start_at"], values["end_at"])
         self._ensure_free(space, values["start_at"], values["end_at"], values.get("tenant_id"))
 

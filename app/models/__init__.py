@@ -81,3 +81,8 @@ __all__ = [
     "Tenant",
     "TenantOccupancy",
 ]
+
+# Codes for new properties, spaces and assets are generated (16 Nov 2026).
+from app.models.codes import register as _register_codes  # noqa: E402
+
+_register_codes()

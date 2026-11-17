@@ -21,6 +21,7 @@ LEGAL_FIELDS = (
     "gstin",
     "pan",
     "cin",
+    "personal_pan",
 )
 
 
@@ -37,9 +38,14 @@ class TenantLegal(InputSchema):
     gstin: str | None = Field(
         default=None, pattern=GSTIN_PATTERN, description="e.g. 36ABCDE1234F1Z5"
     )
-    pan: str | None = Field(default=None, pattern=PAN_PATTERN, description="e.g. ABCDE1234F")
+    pan: str | None = Field(
+        default=None, pattern=PAN_PATTERN, description="The company's PAN, e.g. ABCDE1234F"
+    )
     cin: str | None = Field(
         default=None, pattern=CIN_PATTERN, description="21 characters, e.g. U72200TG2015PTC123456"
+    )
+    personal_pan: str | None = Field(
+        default=None, pattern=PAN_PATTERN, description="The member's own PAN, never the company's"
     )
 
     @field_validator(*LEGAL_FIELDS, mode="before")
@@ -50,7 +56,7 @@ class TenantLegal(InputSchema):
             return value or None
         return value
 
-    @field_validator("gstin", "pan", "cin", mode="before")
+    @field_validator("gstin", "pan", "cin", "personal_pan", mode="before")
     @classmethod
     def _upper(cls, value: object) -> object:
         return value.upper() if isinstance(value, str) else value
@@ -111,6 +117,10 @@ class TenantRead(ReadSchema):
     gstin: str | None = None
     pan: str | None = None
     cin: str | None = None
+    personal_pan: str | None = None
+    has_signature: bool = Field(
+        default=False, description="A signature image is on file (an asset, not a signing)."
+    )
     archived_at: datetime | None
     created_at: datetime
     updated_at: datetime

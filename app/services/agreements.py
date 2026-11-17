@@ -57,6 +57,8 @@ from app.models.user import AppUser
 from app.services.amount_words import rupees_in_words
 from app.services.base import commit, flush, log_activity, require
 from app.services.contracts import group_members
+from app.services.coworking_terms import COWORKING_PLACEHOLDERS
+from app.services.coworking_terms import OPTIONAL as COWORKING_OPTIONAL
 from app.services.occupancy import business_today
 from app.storage import ObjectStorage, StorageError
 
@@ -210,6 +212,8 @@ TYPE_PLACEHOLDERS = {
         "licence.commencement_date": "Licence commencement date",
         "licence.expiry_date": "Licence expiry date",
         "licence.fee_words": "Licence fee in words",
+        # The owner's names for the Coworking License Agreement (17 Nov 2026).
+        **COWORKING_PLACEHOLDERS,
     },
 }
 
@@ -1147,7 +1151,19 @@ class AgreementService:
         labels = allowed_placeholders(ContractType(template.contract_type), template.custom_fields)
         values: dict[str, Any] = {}
         missing: list[str] = []
+        if ContractType(template.contract_type) == ContractType.COWORKING_LICENCE:
+            optional |= COWORKING_OPTIONAL
+            if any(n.startswith("item.") for n in template.placeholders):
+                # Rows of the membership table ({%tr for item in membership_items %}).
+                values["membership_items"] = available.get("membership_items") or []
+                if not values["membership_items"]:
+                    missing.append(
+                        "Membership table (needs the agreed fee on the contract and a monthly "
+                        "pricing rule with GST for the space)"
+                    )
         for name in template.placeholders:
+            if name.startswith("item."):
+                continue  # a loop variable, filled row by row
             value = available.get(name)
             if value is None or value == "":
                 if name in optional:
@@ -1290,6 +1306,22 @@ class AgreementService:
                     "licence.expiry_date": facts["contract.end_date"],
                     "licence.fee_words": facts["pricing.amount_words"],
                 }
+            )
+            from app.services.coworking_terms import coworking_values
+
+            facts.update(
+                coworking_values(
+                    self.session,
+                    contract,
+                    list(members),
+                    prop=prop,
+                    building=building,
+                    floor=floor,
+                    profile=profile,
+                    premises=premises,
+                    address=address,
+                    generated_on=business_today(),
+                )
             )
         return facts
 

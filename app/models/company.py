@@ -6,7 +6,7 @@ agreement. Admin only. No Aadhaar."""
 
 import uuid
 
-from sqlalchemy import ForeignKey, String, Text
+from sqlalchemy import CheckConstraint, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -15,6 +15,11 @@ from app.models.mixins import TimestampMixin, UUIDPrimaryKeyMixin
 
 class CompanyProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "company_profiles"
+    __table_args__ = (
+        CheckConstraint(
+            "bank_ifsc IS NULL OR bank_ifsc ~ '^[A-Z]{4}0[A-Z0-9]{6}$'", name="bank_ifsc_format"
+        ),
+    )
 
     legal_name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
     registered_address: Mapped[str | None] = mapped_column(String(500))
@@ -24,6 +29,16 @@ class CompanyProfile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     gstin: Mapped[str | None] = mapped_column(String(15))
     pan: Mapped[str | None] = mapped_column(String(10))
     cin: Mapped[str | None] = mapped_column(String(21))
+    # Contact and bank details printed on agreements (17 Nov 2026): kept here only, so
+    # every document takes them from one place. The licensor's account, never a member's.
+    phone: Mapped[str | None] = mapped_column(String(32))
+    email: Mapped[str | None] = mapped_column(String(320))
+    bank_name: Mapped[str | None] = mapped_column(String(120))
+    bank_account_name: Mapped[str | None] = mapped_column(String(200))
+    bank_account_number: Mapped[str | None] = mapped_column(String(34))
+    bank_ifsc: Mapped[str | None] = mapped_column(String(11))
+    bank_branch: Mapped[str | None] = mapped_column(String(120))
+    upi_id: Mapped[str | None] = mapped_column(String(100))
     notes: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("app_users.id", ondelete="SET NULL")

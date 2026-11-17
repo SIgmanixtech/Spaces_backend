@@ -91,6 +91,8 @@ CATEGORY_FIELDS = (
     "vehicle_registration",
     "lock_in_period",
     "notice_period",
+    "payment_due_day",
+    "tds_percent",
 )
 # Terms an addendum changes once the agreement is signed (LC-3).
 TERM_FIELDS = (
@@ -99,6 +101,8 @@ TERM_FIELDS = (
     "terms",
     "lock_in_period",
     "notice_period",
+    "payment_due_day",
+    "tds_percent",
     "expected_headcount",
     "occupants",
     "government_department",
@@ -1231,6 +1235,8 @@ class ContractService:
                     vehicle_registration=c.vehicle_registration,
                     lock_in_period=c.lock_in_period,
                     notice_period=c.notice_period,
+                    payment_due_day=c.payment_due_day,
+                    tds_percent=c.tds_percent,
                     booking_id=c.booking_id,
                     missing_for_approval=self._missing(c) if c.status == "PENDING" else [],
                 )

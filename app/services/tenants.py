@@ -201,6 +201,7 @@ class TenantService(CrudService[Tenant]):
                         "occupancy_status": status,
                         "booking_refs": booking_refs[tenant.id],
                         "client_access": access_status(tenant),
+                        "has_signature": tenant.signature_path is not None,
                         "client_access_blocker": (
                             None
                             if tenant.client_activated_at is not None

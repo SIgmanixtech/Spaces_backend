@@ -19,6 +19,14 @@ PROFILE_TEXT = (
     "pan",
     "cin",
     "notes",
+    "phone",
+    "email",
+    "bank_name",
+    "bank_account_name",
+    "bank_account_number",
+    "bank_ifsc",
+    "bank_branch",
+    "upi_id",
 )
 
 
@@ -31,7 +39,7 @@ class _Tidy(InputSchema):
             return value or None
         return value
 
-    @field_validator("gstin", "pan", "cin", mode="before", check_fields=False)
+    @field_validator("gstin", "pan", "cin", "bank_ifsc", mode="before", check_fields=False)
     @classmethod
     def _upper(cls, value: object) -> object:
         return value.upper() if isinstance(value, str) else value
@@ -47,6 +55,16 @@ class CompanyProfileCreate(_Tidy):
     pan: str | None = Field(default=None, pattern=PAN_PATTERN)
     cin: str | None = Field(default=None, pattern=CIN_PATTERN)
     notes: str | None = Field(default=None, max_length=2000)
+    phone: str | None = Field(default=None, pattern=r"^\+?[0-9 ()-]{7,20}$")
+    email: str | None = Field(default=None, max_length=320, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    bank_name: str | None = Field(default=None, max_length=120)
+    bank_account_name: str | None = Field(default=None, max_length=200)
+    bank_account_number: str | None = Field(default=None, pattern=r"^[0-9]{6,34}$")
+    bank_ifsc: str | None = Field(default=None, pattern=r"^[A-Z]{4}0[A-Z0-9]{6}$")
+    bank_branch: str | None = Field(default=None, max_length=120)
+    upi_id: str | None = Field(
+        default=None, max_length=100, pattern=r"^[A-Za-z0-9._-]{2,}@[A-Za-z0-9.-]{2,}$"
+    )
 
 
 class CompanyProfileUpdate(_Tidy, UpdateSchema):
@@ -61,6 +79,16 @@ class CompanyProfileUpdate(_Tidy, UpdateSchema):
     pan: str | None = Field(default=None, pattern=PAN_PATTERN)
     cin: str | None = Field(default=None, pattern=CIN_PATTERN)
     notes: str | None = Field(default=None, max_length=2000)
+    phone: str | None = Field(default=None, pattern=r"^\+?[0-9 ()-]{7,20}$")
+    email: str | None = Field(default=None, max_length=320, pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+    bank_name: str | None = Field(default=None, max_length=120)
+    bank_account_name: str | None = Field(default=None, max_length=200)
+    bank_account_number: str | None = Field(default=None, pattern=r"^[0-9]{6,34}$")
+    bank_ifsc: str | None = Field(default=None, pattern=r"^[A-Z]{4}0[A-Z0-9]{6}$")
+    bank_branch: str | None = Field(default=None, max_length=120)
+    upi_id: str | None = Field(
+        default=None, max_length=100, pattern=r"^[A-Za-z0-9._-]{2,}@[A-Za-z0-9.-]{2,}$"
+    )
 
 
 class ProfileProperty(ReadSchema):
@@ -80,6 +108,14 @@ class CompanyProfileRead(ReadSchema):
     pan: str | None
     cin: str | None
     notes: str | None
+    phone: str | None = None
+    email: str | None = None
+    bank_name: str | None = None
+    bank_account_name: str | None = None
+    bank_account_number: str | None = None
+    bank_ifsc: str | None = None
+    bank_branch: str | None = None
+    upi_id: str | None = None
     properties: list[ProfileProperty]
     created_at: datetime
     updated_at: datetime
