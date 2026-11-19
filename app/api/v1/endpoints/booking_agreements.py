@@ -15,7 +15,12 @@ from app.core.errors import BadRequestError
 from app.models.agreement import BookingDocument
 from app.models.booking import Booking
 from app.schemas.agreement import LinkRead, Signer
-from app.schemas.booking_agreement import BookingAgreementRead, BookingDocumentRead
+from app.schemas.booking_agreement import (
+    BookingAgreementGenerate,
+    BookingAgreementPlan,
+    BookingAgreementRead,
+    BookingDocumentRead,
+)
 from app.services.agreements import MAX_SIGNED_COPY_BYTES, MAX_TEMPLATE_BYTES
 from app.services.base import require
 from app.services.booking_agreements import (
@@ -92,6 +97,47 @@ def store_booking_agreement(
         reference=reference,
         generated_on=generated_on,
         notes=notes,
+    )
+    if not created:
+        response.status_code = 200
+    return document_read(document)
+
+
+@router.get(
+    "/bookings/{booking_id}/agreement/plan",
+    response_model=BookingAgreementPlan,
+    responses=NOT_FOUND,
+    summary="Whether the booking's agreement can be generated, and what it needs",
+)
+def booking_agreement_plan(
+    admin: CurrentAdmin, session: DbSession, booking_id: uuid.UUID
+) -> BookingAgreementPlan:
+    plan = BookingAgreementService(session, admin).plan(booking_id)
+    return BookingAgreementPlan.model_validate({k: v for k, v in plan.items() if k != "booking"})
+
+
+@router.post(
+    "/bookings/{booking_id}/agreement/generate",
+    response_model=BookingDocumentRead,
+    status_code=201,
+    responses={
+        **NOT_FOUND,
+        **CONFLICT,
+        200: {"description": "The same file was already stored: that document, unchanged."},
+        400: _error("A typed value is not valid, or a detail is missing from the records."),
+    },
+    summary="Generate the booking's agreement from the approved booking template",
+)
+def generate_booking_agreement(
+    admin: CurrentAdmin,
+    session: DbSession,
+    storage: Storage,
+    response: Response,
+    booking_id: uuid.UUID,
+    body: BookingAgreementGenerate,
+) -> BookingDocumentRead:
+    document, created = BookingAgreementService(session, admin, storage).generate(
+        booking_id, **body.model_dump()
     )
     if not created:
         response.status_code = 200

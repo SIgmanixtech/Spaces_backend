@@ -21,7 +21,12 @@ from app.core.errors import BadRequestError
 from app.models.agreement import ContractDocument, ContractTemplate
 from app.models.company import CompanyProfile
 from app.models.crm import Proposal
-from app.models.enums import ContractCategory, ContractType, DocumentStatus, TemplateStatus
+from app.models.enums import (
+    ContractCategory,
+    DocumentStatus,
+    TemplateStatus,
+    TemplateType,
+)
 from app.models.property import Property
 from app.models.tenant import TenantOccupancy
 from app.schemas.agreement import (
@@ -61,7 +66,7 @@ CONFLICT = {409: _error("Not allowed in the current state; the message says why.
 def template_read(template: ContractTemplate) -> TemplateRead:
     read = TemplateRead.model_validate(template)
     read.unknown_placeholders = unknown_placeholders(
-        template.placeholders, ContractType(template.contract_type), template.custom_fields
+        template.placeholders, TemplateType(template.contract_type), template.custom_fields
     )
     read.unused_custom_fields = [
         f["key"]
@@ -172,7 +177,7 @@ def catalogue(admin: CurrentAdmin) -> FieldCatalogue:
             )
             for f in CUSTOMER_FIELDS.values()
         ],
-        placeholders={t: allowed_placeholders(t) for t in ContractType},
+        placeholders={t: allowed_placeholders(t) for t in TemplateType},
     )
 
 
@@ -182,7 +187,7 @@ def catalogue(admin: CurrentAdmin) -> FieldCatalogue:
 def list_templates(
     admin: CurrentAdmin,
     session: DbSession,
-    contract_type: ContractType | None = None,
+    contract_type: TemplateType | None = None,
     status: TemplateStatus | None = None,
 ) -> list[TemplateRead]:
     return [
@@ -202,7 +207,7 @@ def upload_template(
     session: DbSession,
     storage: Storage,
     file: UploadFile,
-    contract_type: Annotated[ContractType, Form()],
+    contract_type: Annotated[TemplateType, Form()],
     name: Annotated[str, Form(min_length=1, max_length=200)],
     property_id: Annotated[uuid.UUID | None, Form()] = None,
     required_fields: Annotated[

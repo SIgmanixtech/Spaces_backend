@@ -141,6 +141,16 @@ class ContractType(StrEnum):
     COWORKING_LICENCE = "COWORKING_LICENCE"
 
 
+class TemplateType(StrEnum):
+    """What a Word template is for: the two contract types, and the agreement for a one-time
+    booking (owner request of 19 Nov 2026, migration 0027). A booking template is never used
+    for a contract, and a contract template never for a booking."""
+
+    SPACE_LEASE = "SPACE_LEASE"
+    COWORKING_LICENCE = "COWORKING_LICENCE"
+    BOOKING_AGREEMENT = "BOOKING_AGREEMENT"
+
+
 class ContractCategory(StrEnum):
     """What the agreement is for (BR-011, owner decisions D8.1-D8.3 of 2 Nov 2026). A separate
     field next to the agreement type; NULL on contracts and templates made before categories

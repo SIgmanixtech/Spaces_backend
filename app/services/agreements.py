@@ -49,6 +49,7 @@ from app.models.enums import (
     ContractType,
     DocumentStatus,
     TemplateStatus,
+    TemplateType,
 )
 from app.models.property import Property
 from app.models.space import Space
@@ -56,6 +57,7 @@ from app.models.tenant import Tenant, TenantOccupancy
 from app.models.user import AppUser
 from app.services.amount_words import rupees_in_words
 from app.services.base import commit, flush, log_activity, require
+from app.services.booking_terms import BOOKING_PLACEHOLDERS
 from app.services.contracts import group_members
 from app.services.coworking_terms import COWORKING_PLACEHOLDERS
 from app.services.coworking_terms import OPTIONAL as COWORKING_OPTIONAL
@@ -94,6 +96,7 @@ TENANT_PREFILL = {
 TYPE_LABEL = {
     ContractType.SPACE_LEASE: "Space-based rental / lease contract",
     ContractType.COWORKING_LICENCE: "Coworking space licence agreement",
+    TemplateType.BOOKING_AGREEMENT: "One-time booking agreement",
 }
 
 # --- what a customer may be asked for ---------------------------------------------------------
@@ -277,10 +280,14 @@ _NAME = re.compile(r"^[a-z_]+(\.[a-z_]+)*$")
 
 
 def allowed_placeholders(
-    contract_type: ContractType, custom_fields: list[dict[str, Any]] | None = None
+    contract_type: TemplateType | ContractType,
+    custom_fields: list[dict[str, Any]] | None = None,
 ) -> dict[str, str]:
-    customer = {f"customer.{k}": f.label for k, f in CUSTOMER_FIELDS.items()}
     custom = {f"custom.{f['key']}": f["label"] for f in custom_fields or []}
+    if contract_type == TemplateType.BOOKING_AGREEMENT:
+        # A booking is not a contract: none of the contract or customer-detail names.
+        return {**BOOKING_PLACEHOLDERS, **custom}
+    customer = {f"customer.{k}": f.label for k, f in CUSTOMER_FIELDS.items()}
     return {**COMMON_PLACEHOLDERS, **TYPE_PLACEHOLDERS[contract_type], **customer, **custom}
 
 
@@ -315,7 +322,7 @@ def read_placeholders(data: bytes) -> list[str]:
 
 def unknown_placeholders(
     names: list[str],
-    contract_type: ContractType,
+    contract_type: TemplateType | ContractType,
     custom_fields: list[dict[str, Any]] | None = None,
 ) -> list[str]:
     allowed = allowed_placeholders(contract_type, custom_fields)
@@ -440,7 +447,7 @@ class AgreementService:
     def upload_template(
         self,
         *,
-        contract_type: ContractType,
+        contract_type: TemplateType,
         name: str,
         data: bytes,
         original_name: str,
@@ -450,6 +457,11 @@ class AgreementService:
         custom_fields: list[dict[str, Any]] | None = None,
         category: ContractCategory | None = None,
     ) -> ContractTemplate:
+        if contract_type == TemplateType.BOOKING_AGREEMENT and (category or required_fields):
+            raise BadRequestError(
+                "A booking agreement template has no category and asks for no customer "
+                "details; its values come from the booking and the tenant's record."
+            )
         custom = clean_custom_fields(custom_fields or [])
         if len(data) > MAX_TEMPLATE_BYTES:
             raise BadRequestError("The template is larger than 5 MB.")
@@ -520,7 +532,7 @@ class AgreementService:
         if template.status != TemplateStatus.DRAFT:
             raise ConflictError(f"A {template.status.lower()} template cannot be approved.")
         unknown = unknown_placeholders(
-            template.placeholders, ContractType(template.contract_type), template.custom_fields
+            template.placeholders, TemplateType(template.contract_type), template.custom_fields
         )
         if unknown:
             raise ConflictError(
@@ -599,7 +611,7 @@ class AgreementService:
         return template
 
     def templates(
-        self, contract_type: ContractType | None = None, status: TemplateStatus | None = None
+        self, contract_type: TemplateType | None = None, status: TemplateStatus | None = None
     ) -> list[ContractTemplate]:
         statement = select(ContractTemplate).order_by(
             ContractTemplate.contract_type,

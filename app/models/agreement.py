@@ -44,6 +44,7 @@ from app.models.enums import (
     ContractType,
     DocumentStatus,
     TemplateStatus,
+    TemplateType,
 )
 from app.models.mixins import (
     CreatedAtMixin,
@@ -56,7 +57,7 @@ from app.models.mixins import (
 class ContractTemplate(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "contract_templates"
     __table_args__ = (
-        enum_check("contract_type", ContractType),
+        enum_check("contract_type", TemplateType),
         enum_check("status", TemplateStatus),
         enum_check("category", ContractCategory),
         # Versions count per agreement type, category and scope (migration 0022). The
@@ -299,6 +300,9 @@ class BookingDocument(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             name="signed_has_evidence",
         ),
         UniqueConstraint("booking_id", "sha256", name="uq_booking_documents_file"),
+        CheckConstraint(
+            "(template_id IS NULL) = (template_version IS NULL)", name="template_with_version"
+        ),
     )
 
     reference: Mapped[str] = mapped_column(String(40), unique=True, nullable=False)
@@ -318,6 +322,13 @@ class BookingDocument(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     generated_on: Mapped[date] = mapped_column(Date, nullable=False)
     notes: Mapped[str | None] = mapped_column(Text)
+    # Migration 0027: set when the app generated the file from a booking template (NULL for
+    # a file uploaded by hand), with the values it printed.
+    template_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("contract_templates.id", ondelete="RESTRICT")
+    )
+    template_version: Mapped[int | None] = mapped_column(Integer)
+    data: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     uploaded_by: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("app_users.id", ondelete="SET NULL")
     )

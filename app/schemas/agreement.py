@@ -4,13 +4,19 @@ from typing import Literal
 
 from pydantic import Field
 
-from app.models.enums import ContractCategory, ContractType, DocumentStatus, TemplateStatus
+from app.models.enums import (
+    ContractCategory,
+    ContractType,
+    DocumentStatus,
+    TemplateStatus,
+    TemplateType,
+)
 from app.schemas.common import InputSchema, ReadSchema
 
 
 class TemplateRead(ReadSchema):
     id: uuid.UUID
-    contract_type: ContractType
+    contract_type: TemplateType
     category: ContractCategory | None = Field(
         default=None, description="Null: used for any category without its own template."
     )
@@ -41,7 +47,7 @@ class TemplateSummary(ReadSchema):
     id: uuid.UUID
     name: str
     version: int
-    contract_type: ContractType
+    contract_type: TemplateType
 
 
 class AgreementField(ReadSchema):
@@ -98,7 +104,7 @@ class LinkRead(ReadSchema):
 
 class FieldCatalogue(ReadSchema):
     customer_fields: list[AgreementField]
-    placeholders: dict[ContractType, dict[str, str]] = Field(
+    placeholders: dict[TemplateType, dict[str, str]] = Field(
         description="Every placeholder a template of each type may use, with its meaning."
     )
 
